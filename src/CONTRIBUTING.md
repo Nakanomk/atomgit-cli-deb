@@ -1,0 +1,333 @@
+# Contributing to AtomGit CLI
+
+首先，感谢你考虑为 AtomGit CLI 做出贡献！
+
+## 如何贡献
+
+### 报告问题
+
+漏洞、凭据泄露或可被利用的行为请按[安全策略](SECURITY.md)私下报告，不要创建公开 Issue、Discussion 或 PR，也不要在 CI 日志中附带复现材料。安全修复须先协调披露与下游通知，再进入下面的公开贡献流程。
+
+如果你发现了 bug 或有功能建议，请通过以下方式提交：
+
+1. **Bug 报告**：请提供以下信息
+   - 使用的操作系统和架构
+   - `ag-cli version` 输出及安装方式
+   - Go 版本（仅源码构建时，运行 `go version`）
+   - 复现步骤
+   - 期望行为 vs 实际行为
+   - 脱敏后的错误日志（如果有）
+
+2. **功能建议**：请描述
+   - 功能的用例
+   - 期望的行为
+   - 可能的实现方案（可选）
+
+### 提交代码
+
+1. **Fork 仓库**
+
+   先在 AtomGit 上 Fork 本仓库。如果已有 Fork，请先通过 AtomGit 页面完成同步，然后克隆自己的 Fork：
+
+   ```bash
+   git clone https://atomgit.com/YOUR_USERNAME/atomgit-cli.git
+   cd atomgit-cli
+   ```
+
+2. **创建分支**
+
+   ```bash
+   git switch -c feat/your-feature-name
+   # 或
+   git switch -c fix/bug-description
+   ```
+
+3. **开发规范**
+
+   - 最低支持 Go 1.26.6，开发和正式发布建议使用 Go 1.26.8
+   - 使用 `gofmt` 格式化修改的 Go 文件
+   - 为新增或修复的行为添加测试
+   - 保持与现有代码风格一致
+   - 更新相关文档
+
+4. **测试**
+
+   ```bash
+   # 格式化修改的 Go 文件
+   gofmt -w path/to/changed.go
+
+   # 下载并确认正式发布使用的 Go 版本
+   make go-version
+
+   # 使用最低支持的 Go 版本运行兼容性测试
+   make go-min-version test-min-go
+
+   # 运行测试和静态检查
+   go test ./...
+   make lint
+
+   # 在临时目录中验证构建，避免在仓库中留下本地二进制
+   (
+     ag_build_dir="$(mktemp -d)"
+     trap 'rm -rf "$ag_build_dir"' EXIT
+     go build -o "$ag_build_dir/ag-cli" ./cmd/ag-cli
+   )
+
+   # 运行 CI 使用的 Linux 竞态检测
+   make test-race
+
+   # 按 macOS 和 Windows 的构建约束编译全部 Go 测试
+   make test-platform-compile
+
+   # 交叉编译 .goreleaser.yaml 中的全部发布目标
+   make cross-build
+
+   # 构建正式发布使用的二进制并执行固定版本的漏洞扫描
+   make vulncheck
+
+   # 使用假的 registry 和子进程注入运行 npm 测试
+   npm ci --no-fund --no-audit
+   npm test
+   ```
+
+   通用 `CI` workflow 在面向 `main` 的 Pull Request 和 `main` 分支 push 时运行。
+   PR 流水线检出 PR 的最新 head 提交，合并后的流水线验证进入 `main` 的实际提交。
+   PR 作者仍需在提交前运行与改动相符的本地检查，并在 PR 描述中列出结果；合并前
+   应确认当前 PR 提交的 CI 检查通过，合并后继续跟踪 `main` 上的验证结果。
+
+   CI 先运行 `Fast quality gate`：Go 1.26.6 执行一次完整的 `go test ./...`，随后
+   Go 1.26.8 执行格式检查、`go vet`、命令参考检查和本机构建。Go 1.26.8 的全包
+   测试语义由后续 `go test -race ./...` 覆盖，不在门禁中重复执行普通测试。只有
+   门禁成功后，race、发布目标交叉编译、平台测试编译和漏洞扫描才会并行启动；npm
+   测试不依赖 Go 门禁。这样失败提交会释放昂贵的 Go Runner，绿色运行仍保留全部
+   覆盖并保持后续 job 并行。
+
+   各关键命令使用 shell `time` 输出耗时；workflow 和 job 总耗时以 Actions 运行
+   详情的开始/结束时间为准。每个 Go job 使用两个显式的 `cache` 步骤，分别记录
+   `~/go/pkg/mod`（模块和下载的 Go 工具链）与 `~/.cache/go-build` 的恢复结果。
+   比较冷、热缓存时，应同时记录两个 cache 步骤的命中状态、门禁耗时和完整 workflow
+   耗时；只有远端日志显示下游 job 命中，才能确认跨 job 复用生效。cache miss 只影响
+   准备时间，不会跳过任何验证步骤。
+
+   `Update Nix packages` 是独立的维护 workflow，仍可在 `main`、`test`、
+   `nix-update` 分支 push 或手动触发时运行。它会在自身流程中完成 Nix package
+   构建与版本元数据验证，因此非 `main` 的 Nix 更新不依赖通用 CI。
+
+   `make test-race` 在 Linux CI 中运行 `go test -race -count=1 ./...`。可以通过
+   `RACE_PACKAGES` 覆盖包列表，但除非某个包存在已记录的竞态检测器兼容问题，CI
+   应保持默认的全模块覆盖。该目标设置了 Go 文档支持的
+   `GORACE=atexit_sleep_ms=0`：部分测试会将测试二进制重新作为假的 Git 进程执行，
+   关闭竞态运行时退出前的一秒等待可以加快这些辅助进程，同时不会抑制竞态报告。
+   参见 [Go 竞态检测器文档](https://go.dev/doc/articles/race_detector)。
+
+   CI 将跨平台检查合并为两个顺序执行的 job，减少托管 Runner 排队，同时保持平台
+   覆盖不变：`make cross-build` 在一个 job 中编译 Linux amd64/arm64/loong64、
+   macOS amd64/arm64 和 Windows amd64/arm64；`make test-platform-compile` 在另一
+   个 job 中编译 macOS amd64 和 Windows amd64 测试。两个目标都会在开始处理每个
+   平台时打印对应的 `GOOS/GOARCH`，任一目标失败都会终止所在 job。
+
+   AtomGit 托管 Runner 文档目前只列出基于 Linux 的 Ubuntu 和 Euler 环境，因此
+   CI 无法执行原生 macOS 或 Windows 测试。`make test-platform-compile` 对
+   `darwin/amd64` 和 `windows/amd64` 使用 `go test -exec=true`：所有目标平台专用的
+   生产代码和测试代码都必须成功编译、链接，但不会执行生成的测试二进制。在具备相应
+   环境时，发布前仍需在 macOS 和 Windows 上原生运行 `go test ./...`。参见
+   [AtomGit 托管 Runner 文档](https://docs.gitcode.com/docs/help/home/org_project/pipeline/runner-management/using-hosted-runners/)。
+
+   `go.mod` 的 `go` 行规定源码构建所需的最低版本 Go 1.26.6，`toolchain` 行规定
+   开发和正式发布建议使用的精确版本 Go 1.26.8。普通 Make 目标固定使用建议版本，
+   `make test-min-go` 则专门验证最低版本兼容性。AtomGit 的 `setup-go` 当前只提供到
+   Go 1.26.1，因此 CI 先将其作为引导命令，再下载并验证这两个版本。工具链下载
+   遵循 `GOPROXY`，并通过 `GOSUMDB` 配置的校验和数据库验证。参见
+   [AtomGit setup 工具支持列表](https://docs.gitcode.com/docs/help/home/org_project/pipeline/syntax-reference/setup-supported-tools/)
+   和 [Go 工具链文档](https://go.dev/doc/toolchain)。
+
+   `make vulncheck` 使用 Go 1.26.8、`CGO_ENABLED=0` 顺序构建 Linux
+   amd64/arm64/loong64、macOS amd64/arm64 和 Windows amd64/arm64 七个实际发布
+   二进制，再用固定版本的 `govulncheck` 对每个二进制执行可达性扫描。任一目标发现
+   可达漏洞都会使门禁失败。扫描还会输出一次 module 清单，以及 Linux、macOS 和
+   Windows 各一个代表架构的 package 清单，便于区分“模块存在”“包被编译”和
+   “符号可达”三种结果；当前仓库没有架构专用 Go 文件，因此 package 扫描无需在同一
+   OS 的每个架构上重复，但 binary 门禁仍覆盖全部七个目标。package 或 module 级发现
+   仅供排查，不会被误报为可达漏洞；工具下载失败、数据库不可用、构建失败或扫描器错误
+   始终使检查失败。规范数据库中已经撤回的报告不计为漏洞。参见
+   [govulncheck 命令文档](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) 和
+   [Go 漏洞数据库规范](https://go.dev/doc/security/vuln/database)。
+
+   PR 和 push CI 的漏洞任务继续在质量门禁通过后运行，与 race、交叉编译和平台测试
+   编译并行；独立的 `Scheduled vulnerability scan` 每周一 03:17 UTC 扫描当时的
+   `main`，也支持手动触发。定时任务不缓存漏洞数据库，以便每次查询当前数据。为控制
+   Runner 成本，七个目标在一个 Runner 中顺序构建，每个二进制同时用于工具链校验和
+   binary 扫描，不创建七个矩阵 job。若可信的上游 job 已生成同名制品，可通过
+   `VULNCHECK_BUILD=0 VULNCHECK_BINARY_DIR=/path/to/binaries make vulncheck` 复用；目录
+   必须包含 `ag-<goos>-<goarch>`，且调用方负责保证制品来自当前提交和发布工具链。
+
+   npm 测试使用假的 registry 和子进程注入，不得发布软件包、读取真实 npm token，
+   也不得访问真实 registry。
+
+   修改命令参数或输出时，请执行对应命令的 `--help` 冒烟检查；纯文档修改至少运行 `git diff --check`。命令树或命令元数据发生变化时，请运行 `make docs-reference` 更新自动生成的 `docs/command-reference.md`，并运行 `make docs-reference-check` 确认没有文档漂移。
+
+   Unix manpage 从同一棵 Cobra 命令树生成，但作为构建产物不入库。运行 `make docs-man`（可设置 `MAN_DIR`）和 `make docs-man-check`；安装 `mandoc` 后，Go 测试会检查所有页面的 roff 解析。发布变化还需通过 snapshot 的完整归档手册检查。规范名称、别名、隐藏/弃用命令与选项、显式版本/日期及离线生成规则见[发布指南](docs/releasing.md#manpage-生成与分发)，临时前缀和 `MANPATH` 验证方法见[安装指南](docs/installation.md#unix-man-手册)。不要提交 `dist/` 或更改 Debian changelog。
+
+5. **提交更改**
+
+   ```bash
+   git status --short
+   git add path/to/changed-file
+   git diff --cached --check
+   git commit -m "feat: add new feature description"
+   git push -u origin HEAD
+   ```
+
+   请只暂存本次贡献相关的文件，不要提交 `dist/`、本地 `ag-cli` 二进制、覆盖率文件、IDE 文件或任何凭据。
+
+   提交信息格式：
+   - `feat:` 新功能
+   - `fix:` 修复 bug
+   - `docs:` 文档更新
+   - `style:` 代码格式（不影响功能）
+   - `refactor:` 代码重构
+   - `test:` 测试相关
+   - `chore:` 构建过程或辅助工具的变动
+
+6. **创建 Pull Request**
+
+   从个人 Fork 的开发分支向本仓库的 `main` 分支创建 Pull Request：
+
+   - 描述更改的内容和原因
+   - 关联相关的 issue（如果有）
+   - 说明执行过的测试及结果
+   - 确保当前 PR 提交的 CI 检查通过，且没有未解释的评审阻塞项
+
+7. **请求 AI 代码评审**
+
+   如果仓库已安装 AtomCode AI Review 插件并完成授权，可在 Pull Request 评论区单独发送 `/ai review`，对当前改动执行完整评审并刷新评审评论。更多信息参阅 [AtomGit AI Code Review 文档](https://docs.atomgit.com/en/docs/help/home/org_project/codereview/ai_codereview/)。
+
+8. **获取 PR 改动总结**
+
+   在已启用 AI 代码评审的 Pull Request 评论区单独发送 `/ai summary`，可获取本次 PR 的改动总结，而不会重新执行代码评审。
+
+## 开发指南
+
+### 项目结构
+
+以下仅列出主要目录，完整说明参阅[项目结构](docs/project-structure.md)：
+
+```text
+atomgit-cli/
+├── cmd/ag-cli/                 # 可执行程序入口
+├── internal/               # API、配置、认证和版本等内部实现
+│   ├── agcmd/              # 根命令执行与退出码处理
+│   ├── api/                # AtomGit API v5 客户端
+│   │   └── actions/        # Actions API v8 客户端
+│   ├── config/             # XDG 配置与凭据读写
+│   ├── browser/            # 打开系统浏览器
+│   ├── git/                # Git remote 与仓库信息解析
+│   ├── oauth/              # OAuth 登录流程
+│   └── version/            # 版本与构建元数据
+├── pkg/
+│   ├── cmd/                # Cobra 根命令与子命令
+│   └── cmdutil/            # 命令共享依赖和辅助逻辑
+├── docs/                   # 用户与维护者文档
+├── scripts/                # 构建和发布脚本
+├── nix/                    # Nix package
+└── test/                   # npm 包集成测试
+```
+
+### 添加新命令
+
+参考现有命令的实现模式：
+
+1. 在 `pkg/cmd/<command>/` 中提供 `NewCmdXxx`，并使用 Cobra 的参数校验和 `RunE`
+2. 通过 `cmdutil.Factory` 获取共享依赖，为业务逻辑添加单元测试
+3. 在 `pkg/cmd/root/root.go` 中注册根级命令
+4. 新增或改变用户可见命令、参数和输出时更新 `docs/usage.md`
+5. 只有影响 README 快速入口时才同步修改 README；目录职责变化时更新 `docs/project-structure.md`
+
+`CHANGELOG.md` 用于 Debian 打包，仅在准备新的 Debian 包版本时更新，不记录日常功能改动。
+
+### API 客户端
+
+- 常规仓库功能使用 `internal/api` 中的 AtomGit API v5 客户端
+- Actions run、job、日志和 artifact 使用 `internal/api/actions` 中的 API v8 客户端
+- 请求和响应类型应使用明确的 `json` 标签，并与对应 API 的路径、HTTP 方法和成功状态码保持一致
+- 新增端点族必须提供类型化领域操作，由 Cobra 命令调用；不要在 `pkg/cmd` 中拼接路径或决定 HTTP 成功码。参考 `discussion` 与 `label`
+- 需要认证时使用 `Factory.AuthenticatedAPIClient` / `AuthenticatedActionsClient`；公开只读内容使用 `OptionalAPIClient`
+- 仓库与资源标识通过 `api.RepositoryPath` 转义一次，调用方传入原始值
+- 通过 `cmdutil.Factory` 注入依赖；测试使用模拟 HTTP 服务，不依赖真实凭据或外部网络
+
+### OpenAPI 覆盖与责任清单
+
+[覆盖与责任清单](docs/openapi-coverage.md) 是 API 家族、命令范围、已知缺口、
+维护归属和验证证据的人工事实源，不由命令参考生成器或契约 fixture 替代。
+新增、删除或改变命令/API 家族时，在同一 PR 更新相应行及 Issue/PR 链接；
+新增根命令必须登记，新增子命令也必须人工核对家族范围。
+OpenAPI 变化或契约失败时重新核对实现状态，不将 mock 通过写成在线验证。
+合作方模块移交需附明确的协作决定和接收范围；合入实现后再更新缺口状态。
+在线证据必须注明日期、提交、端点/场景与脱敏记录，不能包含凭据或私有响应。
+
+运行 `go test ./pkg/cmd/root -run TestOpenAPICoverage -count=1` 检查根命令覆盖、
+清单字段及仓库相对链接；该检查包含在默认 `go test ./...` 和 CI 中。
+文档与源码链接使用相对路径；GitHub mirror 不承载本项目的 Issue/PR 协作，
+活跃记录仅在 AtomGit 上维护，Issue/PR 链接使用完整 AtomGit URL。
+
+### OpenAPI 契约验证
+
+新增或修改 API 路径、成功状态码、空响应约定、分页结构或 DTO 时，同步维护
+`internal/api/testdata/contracts/` 的 fixture 和 `internal/api/contract_test.go`
+中的客户端回放。运行 `make test-contract`；这些离线检查也包含在默认 `go test ./...`
+和现有 CI 中，不需要真实凭据。
+
+fixture 必须注明合成或脱敏采集来源。使用专用测试仓库采集只读响应，在仓库外完成脱敏：
+把账号、仓库、ID、时间、正文和 URL 替换为合成值，移除所有凭据及私有信息，
+只保留契约需要的结构和白名单响应头。不要将原始响应放进 Git 再删除。
+写操作只使用合成样例或既有经人工审查的脱敏样例，不为更新 fixture 操作真实资源。
+评审时核对差异是否是服务契约变化，而不是放宽类型或删掉必需字段让测试通过。
+详细格式、采集与审查步骤见 [API 契约测试](docs/api-contracts.md)。
+
+在线检查仅通过 `make test-contract-live` 显式启用，必须提供单独的测试账号 token 和测试仓库。
+它只发送 GET，不读取 `ag-cli auth` 配置，不打印或保存响应正文，也不自动覆盖 fixture。
+
+### 代码风格
+
+- 使用 `gofmt` 格式化代码
+- 遵循 [Effective Go](https://go.dev/doc/effective_go)
+- 为导出的标识符和需要解释的复杂逻辑添加注释
+- 错误信息应包含操作上下文，并使用 `%w` 包装底层错误
+- 业务错误从 Cobra 的 `RunE` 返回，不要在库代码中调用 `os.Exit` 或 `log.Fatal`
+- 不要在日志、错误或测试数据中泄露 access token、refresh token、client secret 等凭据
+
+### 代码质量
+
+使用 [golangci-lint v2](https://golangci-lint.run/) ，基于工作区中的现有配置检查本次修改，
+并评估报告的诊断是否需要修复。
+
+如果诊断经确认属于误报，或对应行为属于有明确理由的例外，需要进行豁免时，
+使用 `//nolint:<linter> // <reason>` 的格式抑制告警，并说明具体原因。
+
+例如：
+
+```go
+//nolint:gosec // G301: Windows ACLs are not controlled by Unix mode bits.
+```
+
+修改包含现有 `nolint` 豁免的代码时，应临时移除相关豁免，并使用项目配置重新运行 lint，
+以确认本次修改没有引入被现有 `nolint` 一并抑制的新诊断。
+
+## 行为准则
+
+- 尊重所有参与者
+- 接受建设性的批评
+- 关注对社区最有利的事情
+- 对其他社区成员表示同理心
+
+## 许可证
+
+通过贡献代码，你同意你的贡献将在 [木兰宽松许可证第2版](LICENSE) 下发布。
+
+## 联系方式
+
+如有问题，可以通过以下方式联系：
+
+- 在 [AtomGit CLI Issues](https://atomgit.com/hust-open-atom-club/atomgit-cli/issues) 中提交问题
+
+再次感谢你的贡献！

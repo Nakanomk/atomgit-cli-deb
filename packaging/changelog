@@ -1,0 +1,7 @@
+atomgit-cli (0.7.4-1~local1) unstable; urgency=medium
+
+  * Create an unofficial local amd64 package from upstream v0.7.4.
+  * Ship static ag-cli, 211 generated manpages and bundled license notices.
+  * Preserve the upstream ag-to-ag-cli command migration.
+
+ -- Local Package Builder <local@localhost>  Thu, 08 Oct 2026 12:10:44 +0000

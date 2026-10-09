@@ -1,0 +1,143 @@
+#!/bin/sh
+# AtomGit CLI (ag-cli) — 一键安装
+# 仓库: https://atomgit.com/hust-open-atom-club/atomgit-cli
+#
+# 用法:
+#   curl -fsSL https://atomgit.com/hust-open-atom-club/atomgit-cli/releases/download/latest/install.sh | sh
+#   AG_VERSION=vX.Y.Z sh install.sh
+#   AG_FROM_SOURCE=1 sh install.sh    # 从本仓库源码构建（需 git、Go）
+
+set -eu
+
+REPO_OWNER="${AG_REPO_OWNER:-hust-open-atom-club}"
+REPO_NAME="${AG_REPO_NAME:-atomgit-cli}"
+BASE_URL="https://atomgit.com/${REPO_OWNER}/${REPO_NAME}"
+# Release 构建会将占位符替换为当前 tag；直接运行源码模板时需设置 AG_VERSION，或使用 AG_FROM_SOURCE=1。
+_BUNDLED_TAG="__AG_RELEASE_TAG__"
+DEFAULT_VERSION="${AG_DEFAULT_VERSION:-${_BUNDLED_TAG}}"
+VERSION="${AG_VERSION:-$DEFAULT_VERSION}"
+
+# 与 AtomGit 默认分支一致（当前为 main）
+GIT_REF="${AG_GIT_REF:-main}"
+
+die() {
+  echo "install.sh: $*" >&2
+  exit 1
+}
+
+detect_os() {
+  os=$(uname -s)
+  case "$os" in
+  Linux) echo linux ;;
+  Darwin) echo darwin ;;
+  *) die "unsupported OS: $os" ;;
+  esac
+}
+
+detect_arch() {
+  arch=$(uname -m)
+  case "$arch" in
+  x86_64 | amd64) echo amd64 ;;
+  aarch64 | arm64) echo arm64 ;;
+  loongarch64 | loong64) echo loong64 ;;
+  *) die "unsupported CPU: $arch" ;;
+  esac
+}
+
+pick_install_dir() {
+  if [ -n "${AG_INSTALL_DIR:-}" ]; then
+    echo "$AG_INSTALL_DIR"
+    return
+  fi
+  prefix="${AG_PREFIX:-}"
+  if [ -z "$prefix" ]; then
+    if [ -w /usr/local/bin ] 2>/dev/null; then
+      prefix="/usr/local"
+    else
+      prefix="$HOME/.local"
+    fi
+  fi
+  echo "$prefix/bin"
+}
+
+install_binary() {
+  if [ "$VERSION" = "__AG_RELEASE_TAG__" ]; then
+    die "源码安装器模板尚未绑定发布版本；请设置 AG_VERSION=vX.Y.Z，或使用 AG_FROM_SOURCE=1 从源码安装"
+  fi
+
+  os=$(detect_os)
+  arch=$(detect_arch)
+  tmpdir=$(mktemp -d)
+  trap "rm -rf \"$tmpdir\"" EXIT INT HUP
+
+  tag="$VERSION"
+  asset="ag_${os}_${arch}.tar.gz"
+  url="${BASE_URL}/releases/download/${tag}/${asset}"
+
+  echo "Downloading ${url} ..."
+  if ! curl -fsSL "$url" -o "${tmpdir}/${asset}"; then
+    die "无法下载预编译包（请确认已发布 ${tag} 且附件名为 ${asset}）。也可使用: AG_FROM_SOURCE=1 sh install.sh"
+  fi
+
+  (cd "$tmpdir" && tar -xzf "$asset")
+  if [ ! -f "${tmpdir}/ag-cli" ]; then
+    die "压缩包内未找到名为 ag-cli 的可执行文件"
+  fi
+
+  dest=$(pick_install_dir)
+  mkdir -p "$dest"
+  if [ ! -w "$dest" ] && command -v sudo >/dev/null 2>&1; then
+    echo "Installing to $dest (sudo) ..."
+    sudo install -m 0755 "${tmpdir}/ag-cli" "${dest}/ag-cli"
+  else
+    echo "Installing to $dest ..."
+    install -m 0755 "${tmpdir}/ag-cli" "${dest}/ag-cli"
+  fi
+
+  case ":${PATH:-}:" in
+  *:"$dest":*) ;;
+  *)
+    echo "请将目录加入 PATH，例如在 ~/.profile 中追加:"
+    echo "  export PATH=\"$dest:\$PATH\""
+    ;;
+  esac
+
+  "${dest}/ag-cli" --help >/dev/null 2>&1 || true
+  echo "ag-cli 已安装: ${dest}/ag-cli"
+}
+
+install_from_source() {
+  command -v git >/dev/null 2>&1 || die "需要 git"
+  command -v go >/dev/null 2>&1 || die "需要 Go 工具链"
+
+  tmpdir=$(mktemp -d)
+  trap "rm -rf \"$tmpdir\"" EXIT INT HUP
+
+  echo "Cloning ${BASE_URL}.git (ref: ${GIT_REF}) ..."
+  git clone --depth 1 --branch "$GIT_REF" "${BASE_URL}.git" "${tmpdir}/src"
+
+  dest=$(pick_install_dir)
+  mkdir -p "$dest"
+  echo "Building ..."
+  (cd "${tmpdir}/src" && go build -o "${tmpdir}/ag-cli" ./cmd/ag-cli)
+
+  if [ ! -w "$dest" ] && command -v sudo >/dev/null 2>&1; then
+    echo "Installing to $dest (sudo) ..."
+    sudo install -m 0755 "${tmpdir}/ag-cli" "${dest}/ag-cli"
+  else
+    echo "Installing to $dest ..."
+    install -m 0755 "${tmpdir}/ag-cli" "${dest}/ag-cli"
+  fi
+
+  echo "ag-cli 已安装: ${dest}/ag-cli"
+}
+
+main() {
+  if [ -n "${AG_FROM_SOURCE:-}" ] && [ "$AG_FROM_SOURCE" != "0" ]; then
+    install_from_source
+  else
+    install_binary
+  fi
+}
+
+main "$@"

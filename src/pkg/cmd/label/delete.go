@@ -1,0 +1,63 @@
+package label
+
+import (
+	"fmt"
+	"strings"
+
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/api"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmdutil"
+	"github.com/spf13/cobra"
+)
+
+func newCmdLabelDelete(f *cmdutil.Factory) *cobra.Command {
+	var yes bool
+
+	cmd := &cobra.Command{
+		Use:   "delete [<owner>/<repo>] <name>",
+		Short: "Delete a repository label",
+		Long: `Delete a repository label from AtomGit.
+
+By default, you will be prompted to confirm the deletion. Use --yes to skip
+the confirmation prompt.`,
+		Example: `  ag-cli label delete owner/repo obsolete
+  ag-cli label delete owner/repo obsolete --yes`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			name := strings.TrimSpace(remaining[0])
+			if err := validateLabelName(name); err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if !yes {
+				confirmed, err := cmdutil.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("Delete label %q from %s? [y/N] ", name, repository.String()))
+				if err != nil {
+					return err
+				}
+				if !confirmed {
+					fmt.Fprintln(out, "Deletion cancelled.")
+					return nil
+				}
+			}
+
+			client, err := f.AuthenticatedAPIClient()
+			if err != nil {
+				return err
+			}
+
+			if err := api.DeleteLabel(client, repository.Owner, repository.Name, name); err != nil {
+				return fmt.Errorf("failed to delete label: %w", err)
+			}
+
+			fmt.Fprintf(out, "Deleted label %q\n", name)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
+	return cmd
+}

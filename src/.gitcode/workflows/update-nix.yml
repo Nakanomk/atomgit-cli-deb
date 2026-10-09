@@ -1,0 +1,80 @@
+name: Update Nix packages
+
+on:
+  push:
+    branches:
+      - main
+      - test
+      - nix-update
+  workflow_dispatch:
+
+# The workflow's own ATOMGIT_TOKEN only needs to clone the repository.
+# Repository writes go through the separately scoped NIX_UPDATE_TOKEN PAT,
+# which workflow permissions cannot constrain.
+permissions:
+  repository: read
+  project: none
+  pr: none
+  issue: none
+  note: none
+
+concurrency:
+  enable: true
+  max: 1
+  exceed-action: QUEUE
+
+jobs:
+  update:
+    name: Update stable and latest
+    # Manual dispatch runs the workflow file from whichever branch was
+    # selected, so the repository, full ref, and event type must be
+    # re-checked before any step can reach repository secrets or the
+    # write-back token. The guard is a shell step because the dispatcher
+    # fails the whole run at startup when a job-level "if:" combines
+    # comparisons with && or ||.
+    runs-on: [ubuntu-latest, x64, small]
+    steps:
+      - name: Check out triggering ref
+        uses: checkout
+        with:
+          fetch-depth: 0
+
+      - name: Guard execution context
+        env:
+          GUARD_REPOSITORY: ${{ atomgit.repository }}
+          GUARD_REF: ${{ atomgit.ref }}
+          GUARD_EVENT: ${{ atomgit.event_name }}
+        run: sh scripts/guard-nix-update-context.sh
+
+      - name: Install pinned Nix
+        run: |
+          set -eu
+          sh scripts/install-nix.sh
+          export PATH="$HOME/.nix-profile/bin:$PATH"
+
+          mkdir -p "$HOME/.config/nix"
+          printf '%s\n' \
+            "experimental-features = nix-command flakes" \
+            "substituters = https://mirrors.cernet.edu.cn/nix-channels/store?priority=10 https://mirrors.tuna.tsinghua.edu.cn/nix-channels/store?priority=20 https://mirror.sjtu.edu.cn/nix-channels/store?priority=30 https://mirrors.ustc.edu.cn/nix-channels/store?priority=40 https://cache.nixos.org/?priority=50" \
+            > "$HOME/.config/nix/nix.conf"
+          nix --version
+
+      # nix-update, jq, curl, and the Nix toolchain used for the update all
+      # come from the nixpkgs input pinned by the committed flake.lock
+      # instead of a moving channel, apt, or the runner image.
+      - name: Update stable and latest
+        run: |
+          set -eu
+          export PATH="$HOME/.nix-profile/bin:$PATH"
+          nix develop --no-update-lock-file . -c bash scripts/update-nix-packages.sh
+
+      # The write-back token is scoped to this step's environment and is
+      # sent as an Authorization header; it never appears in a URL, an
+      # artifact, or printed output. See scripts/publish-nix-update.sh.
+      - name: Publish updates through Contents API
+        env:
+          NIX_UPDATE_TOKEN: ${{ secrets.NIX_UPDATE_TOKEN }}
+        run: |
+          set -eu
+          export PATH="$HOME/.nix-profile/bin:$PATH"
+          nix develop --no-update-lock-file . -c bash scripts/publish-nix-update.sh

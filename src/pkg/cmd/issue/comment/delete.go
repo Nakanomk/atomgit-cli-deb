@@ -1,0 +1,90 @@
+package comment
+
+import (
+	"fmt"
+	"strconv"
+
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/api"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmdutil"
+	"github.com/spf13/cobra"
+)
+
+func newCmdDelete(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		Yes bool
+	}
+
+	cmd := &cobra.Command{
+		Use:   "delete [<owner>/<repo>] <number> <comment-id>",
+		Short: "Delete a comment on an issue",
+		Args:  cobra.RangeArgs(2, 3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 2)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+
+			number, err := strconv.Atoi(remaining[0])
+			if err != nil || number <= 0 {
+				return fmt.Errorf("invalid issue number: %s", remaining[0])
+			}
+
+			commentID, err := strconv.Atoi(remaining[1])
+			if err != nil || commentID <= 0 {
+				return fmt.Errorf("invalid comment ID: %s", remaining[1])
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+			currentUser, err := f.Config.GetUser()
+			if err != nil {
+				return fmt.Errorf("failed to get current user: %w", err)
+			}
+
+			comment, err := api.GetIssueCommentForParent(client, owner, repo, number, commentID)
+			if err != nil {
+				return fmt.Errorf("failed to verify comment parent: %w", err)
+			}
+			path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID)
+
+			// Check if current user owns this comment
+			if comment.User.Login != currentUser {
+				return fmt.Errorf("只能删除自己的评论")
+			}
+
+			out := cmd.OutOrStdout()
+
+			// Confirm deletion
+			if !opts.Yes {
+				confirmed, err := cmdutil.Confirm(cmd.InOrStdin(), cmd.ErrOrStderr(), fmt.Sprintf("确定要删除评论 #%d 吗? [y/N]: ", commentID))
+				if err != nil {
+					return err
+				}
+				if !confirmed {
+					fmt.Fprintln(out, "取消删除")
+					return nil
+				}
+			}
+
+			// Delete comment
+			if err := client.Delete(path); err != nil {
+				return fmt.Errorf("failed to delete comment: %w", err)
+			}
+
+			fmt.Fprintf(out, "Deleted comment #%d\n", commentID)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Skip confirmation prompt")
+
+	return cmd
+}

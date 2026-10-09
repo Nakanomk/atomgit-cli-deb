@@ -1,0 +1,494 @@
+package issue
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/api"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/browser"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmd/issue/comment"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmdutil"
+	"github.com/spf13/cobra"
+)
+
+func NewCmdIssue(f *cmdutil.Factory) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "issue",
+		Short: "Manage issues",
+		Long:  `Create, view, and manage issues.`,
+	}
+
+	cmd.AddCommand(newCmdIssueList(f))
+	cmd.AddCommand(newCmdIssueView(f))
+	cmd.AddCommand(newCmdIssueCreate(f))
+	cmd.AddCommand(newCmdIssueEdit(f))
+	cmd.AddCommand(newCmdIssueClose(f))
+	cmd.AddCommand(newCmdIssueLabel(f))
+	cmd.AddCommand(newCmdIssueReopen(f))
+	cmd.AddCommand(newCmdIssuePRS(f))
+	cmd.AddCommand(newCmdIssueBranches(f))
+	cmd.AddCommand(newCmdIssueActivity(f))
+	cmd.AddCommand(newCmdIssueHistory(f))
+	cmd.AddCommand(newCmdIssueReactions(f))
+	cmd.AddCommand(comment.NewCmdComment(f))
+	cmdutil.AddRepositoryContextHelp(cmd)
+
+	return cmd
+}
+
+func newCmdIssueClose(f *cmdutil.Factory) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "close [<owner>/<repo>] <number>",
+		Short: "Close an issue",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Resolve and validate arguments before any authentication or
+			// network initialization so invalid input never reaches GetToken.
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parseIssueNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			issuePath := fmt.Sprintf("/repos/%s/%s/issues/%s", owner, repo, number)
+			var current api.Issue
+			if err := client.Get(issuePath, &current); err != nil {
+				return fmt.Errorf("failed to get issue before closing: %w", err)
+			}
+
+			updatePath := fmt.Sprintf("/repos/%s/issues/%s", owner, number)
+			fields := map[string]string{
+				"repo":  repo,
+				"title": current.Title,
+				"state": "close",
+			}
+			if err := client.PatchForm(updatePath, fields, nil); err != nil {
+				return fmt.Errorf("failed to close issue: %w", err)
+			}
+
+			var verified api.Issue
+			if err := client.Get(issuePath, &verified); err != nil {
+				return fmt.Errorf("failed to verify issue state: %w", err)
+			}
+			if !strings.EqualFold(strings.TrimSpace(verified.State), "closed") {
+				return fmt.Errorf("issue #%s is still not closed after update (state: %q)", number, verified.State)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Closed issue #%s\n", number)
+
+			return nil
+		},
+	}
+
+	return cmd
+}
+
+func newCmdIssueReopen(f *cmdutil.Factory) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reopen [<owner>/<repo>] <number>",
+		Short: "Reopen an issue",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Resolve and validate arguments before any authentication or
+			// network initialization so invalid input never reaches GetToken.
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parseIssueNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			issuePath := fmt.Sprintf("/repos/%s/%s/issues/%s", owner, repo, number)
+			var current api.Issue
+			if err := client.Get(issuePath, &current); err != nil {
+				return fmt.Errorf("failed to get issue: %w", err)
+			}
+
+			updatePath := fmt.Sprintf("/repos/%s/issues/%s", owner, number)
+			fields := map[string]string{
+				"repo":  repo,
+				"title": current.Title,
+				"state": "reopen",
+			}
+			if err := client.PatchForm(updatePath, fields, nil); err != nil {
+				return fmt.Errorf("failed to reopen issue: %w", err)
+			}
+
+			var verified api.Issue
+			if err := client.Get(issuePath, &verified); err != nil {
+				return fmt.Errorf("failed to verify issue state: %w", err)
+			}
+			if !strings.EqualFold(strings.TrimSpace(verified.State), "open") {
+				return fmt.Errorf("issue #%s is still not open after update (state: %q)", number, verified.State)
+			}
+
+			cmd.Printf("Reopened issue #%s\n", number)
+
+			return nil
+		},
+	}
+
+	return cmd
+}
+
+// resolveIssueListFilter maps the --author/--assignee/--involved flags to the
+// filter value of the /user/issues endpoint: created for @me-authored issues,
+// assigned for issues assigned to @me, and all for issues that are either.
+func resolveIssueListFilter(author, assignee, involved string) (string, error) {
+	hasAuthor, err := cmdutil.UserScopeFlag("--author", author)
+	if err != nil {
+		return "", err
+	}
+	hasAssignee, err := cmdutil.UserScopeFlag("--assignee", assignee)
+	if err != nil {
+		return "", err
+	}
+	hasInvolved, err := cmdutil.UserScopeFlag("--involved", involved)
+	if err != nil {
+		return "", err
+	}
+	count := 0
+	for _, set := range []bool{hasAuthor, hasAssignee, hasInvolved} {
+		if set {
+			count++
+		}
+	}
+	if count > 1 {
+		return "", fmt.Errorf("--author, --assignee and --involved cannot be used together")
+	}
+	switch {
+	case hasAuthor:
+		return "created", nil
+	case hasAssignee:
+		return "assigned", nil
+	case hasInvolved:
+		return "all", nil
+	default:
+		return "", nil
+	}
+}
+
+// issueListStates are the states the AtomGit issue list endpoints accept. The
+// PR list endpoints accept a wider set, so each command keeps its own
+// completion candidates instead of sharing one enum.
+var issueListStates = []string{"open", "closed", "all"}
+
+func newCmdIssueList(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		State    string
+		Limit    int
+		JSON     bool
+		Author   string
+		Assignee string
+		Involved string
+	}
+
+	cmd := &cobra.Command{
+		Use:   "list [<owner>/<repo>]",
+		Short: "List issues",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Limit <= 0 {
+				return fmt.Errorf("invalid limit: %d (must be positive)", opts.Limit)
+			}
+
+			filter, err := resolveIssueListFilter(opts.Author, opts.Assignee, opts.Involved)
+			if err != nil {
+				return err
+			}
+			if filter != "" && len(args) > 0 {
+				return fmt.Errorf("--author/--assignee/--involved @me lists issues across all your repositories and cannot be combined with an explicit <owner>/<repo>")
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			var issues []api.Issue
+			if filter != "" {
+				issues, err = api.GetPaginated[api.Issue](client, opts.Limit, func(page, perPage int) string {
+					return fmt.Sprintf("/user/issues?filter=%s&state=%s&page=%d&per_page=%d", filter, opts.State, page, perPage)
+				})
+			} else {
+				repository, _, repoErr := cmdutil.ResolveRepositoryFromArgs(f, args, 0)
+				if repoErr != nil {
+					return repoErr
+				}
+				owner, repo := repository.Owner, repository.Name
+				issues, err = api.GetPaginated[api.Issue](client, opts.Limit, func(page, perPage int) string {
+					return fmt.Sprintf("/repos/%s/%s/issues?state=%s&page=%d&per_page=%d", owner, repo, opts.State, page, perPage)
+				})
+			}
+			if err != nil {
+				return err
+			}
+			if opts.JSON {
+				return cmdutil.WriteJSON(cmd.OutOrStdout(), issuesJSON(issues))
+			}
+
+			out := cmd.OutOrStdout()
+			for _, issue := range issues {
+				if filter != "" {
+					// Cross-repository listings must disambiguate entries:
+					// numbers are only unique within their own repository.
+					owner, repo := cmdutil.OwnerRepoFromWebURL(issue.HTMLURL)
+					if owner != "" && repo != "" {
+						fmt.Fprintf(out, "%s/%s #%s %s [%s]\n", owner, repo, issue.GetNumber(), issue.Title, issue.State)
+						continue
+					}
+				}
+				fmt.Fprintf(out, "#%s %s [%s]\n", issue.GetNumber(), issue.Title, issue.State)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&opts.State, "state", "s", "open", "Filter by state: open, closed, all")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum number of issues to list")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output issues as JSON")
+	cmd.Flags().StringVar(&opts.Author, "author", "", "Filter by author: @me for issues you created across all your repositories")
+	cmd.Flags().StringVar(&opts.Assignee, "assignee", "", "Filter by assignee: @me for issues assigned to you across all your repositories")
+	cmd.Flags().StringVar(&opts.Involved, "involved", "", "Filter by involvement: @me for issues you created or are assigned to across all your repositories")
+	cmdutil.RegisterValueCompletion(cmd, "state", issueListStates)
+
+	return cmd
+}
+
+func newCmdIssueView(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		web  bool
+		json bool
+	}
+
+	cmd := &cobra.Command{
+		Use:   "view [<owner>/<repo>] <number>",
+		Short: "View an issue",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parseIssueNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			if opts.web {
+				num, err := strconv.Atoi(number)
+				if err != nil {
+					return fmt.Errorf("invalid issue number: %s", number)
+				}
+				u := browser.BuildIssueURL(owner, repo, num)
+				fmt.Fprintf(cmd.OutOrStdout(), "Opening %s in your browser.\n", u)
+				if f.BrowserOpener != nil {
+					if err := f.BrowserOpener(u); err != nil {
+						return fmt.Errorf("failed to open browser: %w", err)
+					}
+				}
+				return nil
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			var issue api.Issue
+			path := fmt.Sprintf("/repos/%s/%s/issues/%s", owner, repo, number)
+			if err := client.Get(path, &issue); err != nil {
+				return err
+			}
+			if opts.json {
+				return cmdutil.WriteJSON(cmd.OutOrStdout(), newIssueJSON(issue))
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Title: %s\n", issue.Title)
+			fmt.Fprintf(out, "State: %s\n", issue.State)
+			if labels := formatIssueLabels(issue.Labels); labels != "" {
+				fmt.Fprintf(out, "Labels: %s\n", labels)
+			}
+			fmt.Fprintf(out, "Author: %s\n", issue.User.Login)
+			fmt.Fprintf(out, "URL: %s\n", issue.HTMLURL)
+			fmt.Fprintf(out, "Created: %s\n", issue.CreatedAt)
+			if issue.Body != "" {
+				fmt.Fprintf(out, "\n%s\n", issue.Body)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&opts.web, "web", "w", false, "Open an issue in the browser")
+	cmd.Flags().BoolVar(&opts.json, "json", false, "Output issue as JSON")
+	cmd.MarkFlagsMutuallyExclusive("web", "json")
+
+	return cmd
+}
+
+type issueJSON struct {
+	ID        int64    `json:"id"`
+	Number    string   `json:"number"`
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	State     string   `json:"state"`
+	URL       string   `json:"url"`
+	Author    string   `json:"author"`
+	Labels    []string `json:"labels"`
+	CreatedAt string   `json:"createdAt"`
+	UpdatedAt string   `json:"updatedAt"`
+}
+
+func issuesJSON(issues []api.Issue) []issueJSON {
+	result := make([]issueJSON, len(issues))
+	for index, issue := range issues {
+		result[index] = newIssueJSON(issue)
+	}
+	return result
+}
+
+func newIssueJSON(issue api.Issue) issueJSON {
+	labels := make([]string, 0, len(issue.Labels))
+	for _, label := range issue.Labels {
+		if name := strings.TrimSpace(label.Name); name != "" {
+			labels = append(labels, name)
+		}
+	}
+	return issueJSON{ID: issue.ID, Number: issue.GetNumber(), Title: issue.Title, Body: issue.Body, State: issue.State, URL: issue.HTMLURL, Author: issue.User.Login, Labels: labels, CreatedAt: issue.CreatedAt, UpdatedAt: issue.UpdatedAt}
+}
+
+func formatIssueLabels(labels []api.Label) string {
+	names := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if name := strings.TrimSpace(label.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+func newCmdIssueCreate(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		Title    string
+		Body     string
+		BodyFile string
+		Assignee string
+	}
+
+	cmd := &cobra.Command{
+		Use:   "create [<owner>/<repo>]",
+		Short: "Create an issue",
+		Example: `  ag-cli issue create owner/repo --title "Bug report" --body "Description"
+  ag-cli issue create owner/repo --title "Bug report" --assignee alice
+  ag-cli issue create owner/repo --title "Bug report" --body-file description.md
+  ag-cli issue create owner/repo --title "Bug report" --body-file -`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Title == "" {
+				return fmt.Errorf("title is required")
+			}
+			assignee := strings.TrimSpace(opts.Assignee)
+			if cmd.Flags().Changed("assignee") && assignee == "" {
+				return fmt.Errorf("assignee cannot be empty")
+			}
+
+			bodyText, err := cmdutil.ReadBody(
+				opts.Body,
+				opts.BodyFile,
+				cmd.Flags().Changed("body"),
+				cmd.Flags().Changed("body-file"),
+				cmd.InOrStdin(),
+			)
+			if err != nil {
+				return err
+			}
+
+			repository, _, err := cmdutil.ResolveRepositoryFromArgs(f, args, 0)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			issue, err := api.CreateIssueWithAssignee(client, owner, repo, opts.Title, bodyText, assignee)
+			if err != nil {
+				return err
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Created issue #%s: %s\n", issue.GetNumber(), issue.HTMLURL)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&opts.Title, "title", "t", "", "Issue title")
+	cmd.Flags().StringVarP(&opts.Body, "body", "b", "", "Issue body")
+	cmd.Flags().StringVarP(&opts.BodyFile, "body-file", "F", "", "Read issue body from file (use - for stdin)")
+	cmd.Flags().StringVar(&opts.Assignee, "assignee", "", "Assign the issue to a user (login)")
+	cmd.MarkFlagsMutuallyExclusive("body", "body-file")
+
+	return cmd
+}
+
+// parseIssueNumber validates that number is a positive integer and returns its
+// canonical decimal form. Rejecting non-numeric values before they are
+// interpolated into an API request path prevents path traversal or query
+// injection via the issue number argument.
+func parseIssueNumber(value string) (string, error) {
+	number, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || number <= 0 {
+		return "", fmt.Errorf("invalid issue number %q (expected a positive integer)", value)
+	}
+	return strconv.Itoa(number), nil
+}

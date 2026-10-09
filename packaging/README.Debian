@@ -1,0 +1,41 @@
+AtomGit CLI 0.7.4, local Debian package
+====================================
+
+Upstream: https://atomgit.com/hust-open-atom-club/atomgit-cli
+Source mirror: https://github.com/hust-open-atom-club/atomgit-cli
+Tag: v0.7.4
+Commit: 1b9de43514ff4f0588b06fdd4cff930fe74ce5f0
+
+This is an unofficial, unsigned local build, not a package from Debian's
+archive or an upstream-provided Debian package. No upstream code was patched.
+
+The command is ag-cli. Upstream 0.7.4 renamed ag to ag-cli and intentionally
+provides no ag compatibility symlink. Existing ag from The Silver Searcher
+is not affected. Configuration remains in ~/.config/ag-cli.
+
+Install: sudo apt install ./atomgit-cli_0.7.4-1~local1_amd64.deb
+Verify: ag-cli version
+Help: ag-cli --help
+Manual: man ag-cli
+Uninstall: sudo apt remove atomgit-cli
+
+Architecture: Linux amd64, baseline GOAMD64=v1. Built using Go 1.26.8 with
+CGO_ENABLED=0; the ELF has no dynamic interpreter or shared-library linkage,
+so this binary does not impose a glibc version requirement. Runtime checks
+were performed on Debian 13 (trixie) amd64 only. Debian 12+ amd64 is the
+intended target, but other releases were not independently tested.
+
+Depends on ca-certificates for HTTPS. Git is recommended and needed for
+clone and local repository workflows; xdg-utils is optional for opening a
+browser. No Go compiler or Node.js runtime is required to use this package.
+
+Upgrade by installing a newer .deb with apt. Do not use ag-cli update to
+manage this package: upstream's built-in updater only handles npm/Homebrew.
+This package has no maintainer scripts and performs no authentication,
+Git configuration changes, or network operations during package setup.
+
+Licenses: upstream MulanPSL-2.0 in copyright; all retained bundled-module
+and Go notices are in licenses/. build-info.txt records the Go build data.
+
+BuildDate in the binary is the upstream commit timestamp, fixed for
+reproducibility, not the wall-clock time the local package was built.

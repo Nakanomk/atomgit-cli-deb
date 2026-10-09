@@ -1,0 +1,136 @@
+package label
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/api"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmdutil"
+	"github.com/spf13/cobra"
+)
+
+var labelColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$`)
+
+func newCmdLabelCreate(f *cmdutil.Factory) *cobra.Command {
+	var name, color string
+
+	cmd := &cobra.Command{
+		Use:     "create [<owner>/<repo>]",
+		Short:   "Create a repository label",
+		Long:    "Create a repository label. AtomGit API v5 accepts a name and color for label creation.",
+		Example: `  ag-cli label create owner/repo --name bug --color "#ff0000"`,
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name = strings.TrimSpace(name)
+			color = strings.TrimSpace(color)
+			if err := validateLabelName(name); err != nil {
+				return err
+			}
+			if err := validateLabelColor(color); err != nil {
+				return err
+			}
+
+			repository, _, err := cmdutil.ResolveRepositoryFromArgs(f, args, 0)
+			if err != nil {
+				return err
+			}
+			client, err := f.AuthenticatedAPIClient()
+			if err != nil {
+				return err
+			}
+
+			created, err := api.CreateLabel(client, repository.Owner, repository.Name, api.CreateLabelRequest{
+				Name:  name,
+				Color: color,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create label: %w", err)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Created label %q [%s]\n", created.Name, created.Color)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "Label name")
+	cmd.Flags().StringVar(&color, "color", "", "Label color in #RGB or #RRGGBB format")
+	return cmd
+}
+
+func newCmdLabelEdit(f *cmdutil.Factory) *cobra.Command {
+	var name, color string
+
+	cmd := &cobra.Command{
+		Use:     "edit [<owner>/<repo>] <name>",
+		Short:   "Edit a repository label",
+		Long:    "Edit a repository label. AtomGit API v5 accepts a new name and color for label updates.",
+		Example: `  ag-cli label edit owner/repo bug --name defect --color "#d73a4a"`,
+		Args:    cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			nameChanged := cmd.Flags().Changed("name")
+			colorChanged := cmd.Flags().Changed("color")
+			if !nameChanged && !colorChanged {
+				return fmt.Errorf("at least one of --name or --color must be provided")
+			}
+
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			originalName := strings.TrimSpace(remaining[0])
+			if err := validateLabelName(originalName); err != nil {
+				return fmt.Errorf("invalid existing label name: %w", err)
+			}
+
+			var request api.UpdateLabelRequest
+			if nameChanged {
+				name = strings.TrimSpace(name)
+				if err := validateLabelName(name); err != nil {
+					return err
+				}
+				request.Name = &name
+			}
+			if colorChanged {
+				color = strings.TrimSpace(color)
+				if err := validateLabelColor(color); err != nil {
+					return err
+				}
+				request.Color = &color
+			}
+
+			client, err := f.AuthenticatedAPIClient()
+			if err != nil {
+				return err
+			}
+
+			if err := api.UpdateLabel(client, repository.Owner, repository.Name, originalName, request); err != nil {
+				return fmt.Errorf("failed to edit label: %w", err)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Updated label %q\n", originalName)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "New label name")
+	cmd.Flags().StringVar(&color, "color", "", "New label color in #RGB or #RRGGBB format")
+	return cmd
+}
+
+func validateLabelName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("label name is required")
+	}
+	return nil
+}
+
+func validateLabelColor(color string) error {
+	if strings.TrimSpace(color) == "" {
+		return fmt.Errorf("label color is required")
+	}
+	if !labelColorPattern.MatchString(color) {
+		return fmt.Errorf("invalid label color %q (expected #RGB or #RRGGBB)", color)
+	}
+	return nil
+}

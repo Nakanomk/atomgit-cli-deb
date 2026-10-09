@@ -1,0 +1,286 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  repository: read
+
+jobs:
+  quality-and-test:
+    name: Fast quality gate
+    runs-on: [ubuntu-latest, x64, small]
+    env:
+      GOPROXY: https://mirrors.cernet.edu.cn/go|https://goproxy.cn|direct
+    steps:
+      - name: Check out PR code
+        if: ${{ atomgit.head_ref != '' }}
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check out pushed code
+        if: ${{ atomgit.head_ref == '' }}
+        uses: checkout
+
+      # Restore before setup-go: its verification runs Go in the checkout and
+      # can download the go.mod toolchain into this cache directory. Restoring
+      # afterward would collide with the already extracted read-only files.
+      - name: Restore Go modules and downloaded toolchains
+        uses: cache
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+
+      # AtomGit setup-go provides Go 1.26.1; go.mod selects newer toolchains.
+      - name: Set up bootstrap Go
+        uses: setup-go
+        with:
+          version: "1.26.1"
+
+      - name: Restore Go build cache
+        uses: cache
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-
+
+      - name: Test minimum supported Go toolchain
+        run: time make go-min-version test-min-go
+
+      - name: Select release Go toolchain
+        run: make go-version
+
+      - name: Check formatting and vet
+        run: time make lint
+
+      - name: Build CLI
+        run: time make build
+
+      - name: Check generated command reference
+        run: time make docs-reference-check
+
+  race-test:
+    name: Linux race test
+    needs: quality-and-test
+    runs-on: [ubuntu-latest, x64, small]
+    env:
+      GOPROXY: https://goproxy.cn,direct
+    steps:
+      - name: Check out PR code
+        if: ${{ atomgit.head_ref != '' }}
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check out pushed code
+        if: ${{ atomgit.head_ref == '' }}
+        uses: checkout
+
+      # This starts after the gate's cache post-steps have completed, while
+      # remaining parallel with the other expensive Go jobs.
+      - name: Restore Go modules and downloaded toolchains
+        uses: cache
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+
+      # AtomGit setup-go provides Go 1.26.1; go.mod selects newer toolchains.
+      - name: Set up bootstrap Go
+        uses: setup-go
+        with:
+          version: "1.26.1"
+
+      - name: Restore Go build cache
+        uses: cache
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-
+
+      - name: Select release Go toolchain
+        run: make go-version
+
+      - name: Run race detector
+        run: time make test-race
+
+  cross-build:
+    name: Cross-build all release targets
+    needs: quality-and-test
+    runs-on: [ubuntu-latest, x64, small]
+    env:
+      GOPROXY: https://goproxy.cn,direct
+    steps:
+      - name: Check out PR code
+        if: ${{ atomgit.head_ref != '' }}
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check out pushed code
+        if: ${{ atomgit.head_ref == '' }}
+        uses: checkout
+
+      - name: Restore Go modules and downloaded toolchains
+        uses: cache
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+
+      # AtomGit setup-go provides Go 1.26.1; go.mod selects newer toolchains.
+      - name: Set up bootstrap Go
+        uses: setup-go
+        with:
+          version: "1.26.1"
+
+      - name: Restore Go build cache
+        uses: cache
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-
+
+      - name: Select release Go toolchain
+        run: make go-version
+
+      - name: Cross-compile all release targets
+        run: time make cross-build
+
+  platform-test-compile:
+    name: Compile all platform tests
+    needs: quality-and-test
+    runs-on: [ubuntu-latest, x64, small]
+    env:
+      GOPROXY: https://goproxy.cn,direct
+    steps:
+      - name: Check out PR code
+        if: ${{ atomgit.head_ref != '' }}
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check out pushed code
+        if: ${{ atomgit.head_ref == '' }}
+        uses: checkout
+
+      - name: Restore Go modules and downloaded toolchains
+        uses: cache
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+
+      # AtomGit setup-go provides Go 1.26.1; go.mod selects newer toolchains.
+      - name: Set up bootstrap Go
+        uses: setup-go
+        with:
+          version: "1.26.1"
+
+      - name: Restore Go build cache
+        uses: cache
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-
+
+      - name: Select release Go toolchain
+        run: make go-version
+
+      - name: Compile all platform-specific tests
+        run: time make test-platform-compile
+
+  vulnerability-scan:
+    name: Go vulnerability scan
+    needs: quality-and-test
+    runs-on: [ubuntu-latest, x64, small]
+    env:
+      GOPROXY: https://goproxy.cn,direct
+    steps:
+      - name: Check out PR code
+        if: ${{ atomgit.head_ref != '' }}
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check out pushed code
+        if: ${{ atomgit.head_ref == '' }}
+        uses: checkout
+
+      - name: Restore Go modules and downloaded toolchains
+        uses: cache
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+
+      # AtomGit setup-go provides Go 1.26.1; go.mod selects newer toolchains.
+      - name: Set up bootstrap Go
+        uses: setup-go
+        with:
+          version: "1.26.1"
+
+      - name: Restore Go build cache
+        uses: cache
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/*.go', 'go.mod', 'go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-
+
+      - name: Select release Go toolchain
+        run: make go-version
+
+      - name: Build and scan all release targets
+        run: time make vulncheck
+
+  npm-test:
+    name: npm test
+    # npm validation has no Go input and intentionally stays independent from
+    # the Go quality gate so JavaScript packaging failures return immediately.
+    runs-on: [ubuntu-latest, x64, small]
+    steps:
+      - name: Check out PR code
+        if: ${{ atomgit.head_ref != '' }}
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check out pushed code
+        if: ${{ atomgit.head_ref == '' }}
+        uses: checkout
+
+      - name: Set up Node.js
+        uses: setup-node
+        with:
+          node-version: "20"
+
+      # Reproducible install from the lockfile; the tests run offline with
+      # fake npm/process injection and never touch a real registry.
+      - name: Install dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Run npm tests
+        run: npm test

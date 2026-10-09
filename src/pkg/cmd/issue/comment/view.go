@@ -1,0 +1,89 @@
+package comment
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/api"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmdutil"
+	"github.com/spf13/cobra"
+)
+
+func newCmdView(f *cmdutil.Factory) *cobra.Command {
+	return &cobra.Command{
+		Use:   "view [<owner>/<repo>] <number>",
+		Short: "View all comments on an issue",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+
+			number, err := strconv.Atoi(remaining[0])
+			if err != nil || number <= 0 {
+				return fmt.Errorf("invalid issue number: %s", remaining[0])
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			var comments []api.Comment
+			path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
+			if err := client.Get(path, &comments); err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if len(comments) == 0 {
+				fmt.Fprintln(out, "No comments found.")
+				return nil
+			}
+
+			fmt.Fprintf(out, "Issue #%d 的评论 (共 %d 条):\n\n", number, len(comments))
+
+			// Sort comments by creation time
+			sort.Slice(comments, func(i, j int) bool {
+				t1, _ := time.Parse(time.RFC3339, comments[i].CreatedAt)
+				t2, _ := time.Parse(time.RFC3339, comments[j].CreatedAt)
+				return t1.Before(t2)
+			})
+
+			// Print comments (flat structure for issues)
+			currentUser, _ := f.Config.GetUser()
+			for _, comment := range comments {
+				// Format timestamp
+				t, _ := time.Parse(time.RFC3339, comment.CreatedAt)
+				timeStr := t.Format("2006-01-02 15:04")
+
+				// Mark current user's comments
+				userMarker := ""
+				if comment.User.Login == currentUser {
+					userMarker = " (你)"
+				}
+
+				fmt.Fprintf(out, "[%d] @%s %s%s\n", comment.ID, comment.User.Login, timeStr, userMarker)
+
+				// Print body
+				bodyLines := strings.SplitSeq(comment.Body, "\n")
+				for line := range bodyLines {
+					fmt.Fprintf(out, "    %s\n", line)
+				}
+				fmt.Fprintln(out)
+			}
+
+			return nil
+		},
+	}
+}

@@ -1,0 +1,951 @@
+package pr
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/api"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/browser"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/internal/commandschema"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmd/pr/comment"
+	"atomgit.com/hust-open-atom-club/atomgit-cli/pkg/cmdutil"
+	"github.com/spf13/cobra"
+)
+
+func NewCmdPR(f *cmdutil.Factory) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "pr",
+		Short: "Manage pull requests",
+		Long:  `Create, view, and checkout pull requests.`,
+	}
+
+	cmd.AddCommand(newCmdPRList(f))
+	cmd.AddCommand(newCmdPRView(f))
+	cmd.AddCommand(newCmdPRCreate(f))
+	cmd.AddCommand(newCmdPREdit(f))
+	cmd.AddCommand(newCmdPRClose(f))
+	cmd.AddCommand(newCmdPRReopen(f))
+	cmd.AddCommand(newCmdPRReview(f))
+	cmd.AddCommand(newCmdPRDiff(f))
+	cmd.AddCommand(newCmdPRChecks(f))
+	cmd.AddCommand(newCmdPRCheckout(f))
+	cmd.AddCommand(newCmdViewIssues(f))
+	cmd.AddCommand(newCmdLinkIssues(f))
+	cmd.AddCommand(newCmdUnlinkIssues(f))
+	cmd.AddCommand(comment.NewCmdComment(f))
+	cmd.AddCommand(newCmdPRMerge(f))
+	cmd.AddCommand(newCmdPRCommits(f))
+	cmd.AddCommand(newCmdPRFiles(f))
+	cmd.AddCommand(newCmdPRReactions(f))
+	cmd.AddCommand(newCmdPRActivity(f))
+	cmd.AddCommand(newCmdPRHistory(f))
+	cmdutil.AddRepositoryContextHelp(cmd)
+
+	return cmd
+}
+
+func resolveBaseBranch(requested string, repository api.Repository) (string, error) {
+	if base := strings.TrimSpace(requested); base != "" {
+		return base, nil
+	}
+	if base := strings.TrimSpace(repository.DefaultBranch); base != "" {
+		return base, nil
+	}
+	return "", fmt.Errorf("repository default branch is empty; specify --base")
+}
+
+func pullRequestResultURL(rawURL, host, owner, repo, number string) string {
+	rawURL = strings.Replace(strings.TrimSpace(rawURL), "/pulls/", "/pull/", 1)
+	return cmdutil.ResolveWebURL(rawURL, host, owner, repo, "pull", number)
+}
+
+func parsePRNumber(numberArg string) (string, error) {
+	numberText := strings.TrimSpace(numberArg)
+	number, err := strconv.Atoi(numberText)
+	if err != nil || number <= 0 {
+		return "", fmt.Errorf("invalid PR number: %s (expected positive integer)", numberArg)
+	}
+
+	return strconv.Itoa(number), nil
+}
+
+// resolvePRListScope maps the --author/--assignee/--review-requested/
+// --review-needed flags to the scope value of the /user/pulls endpoint:
+// created_by_me for PRs authored by @me, assigned_to_me for PRs assigned to
+// @me, need_my_approve for PRs that require @me's approval, and
+// need_my_review for PRs that need @me's review.
+func resolvePRListScope(author, assignee, reviewRequested, reviewNeeded string) (string, error) {
+	hasAuthor, err := cmdutil.UserScopeFlag("--author", author)
+	if err != nil {
+		return "", err
+	}
+	hasAssignee, err := cmdutil.UserScopeFlag("--assignee", assignee)
+	if err != nil {
+		return "", err
+	}
+	hasReviewer, err := cmdutil.UserScopeFlag("--review-requested", reviewRequested)
+	if err != nil {
+		return "", err
+	}
+	hasReviewNeeded, err := cmdutil.UserScopeFlag("--review-needed", reviewNeeded)
+	if err != nil {
+		return "", err
+	}
+	count := 0
+	for _, set := range []bool{hasAuthor, hasAssignee, hasReviewer, hasReviewNeeded} {
+		if set {
+			count++
+		}
+	}
+	if count > 1 {
+		return "", fmt.Errorf("--author, --assignee, --review-requested and --review-needed cannot be used together")
+	}
+	switch {
+	case hasAuthor:
+		return "created_by_me", nil
+	case hasAssignee:
+		return "assigned_to_me", nil
+	case hasReviewer:
+		return "need_my_approve", nil
+	case hasReviewNeeded:
+		return "need_my_review", nil
+	default:
+		return "", nil
+	}
+}
+
+// prListStates are the states the AtomGit pull request list endpoints accept.
+// They are a wider set than the issue list states, so each command keeps its
+// own completion candidates instead of sharing one enum.
+var prListStates = []string{"open", "closed", "locked", "merged", "all"}
+
+func newCmdPRList(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		State           string
+		Limit           int
+		JSON            bool
+		Author          string
+		Assignee        string
+		ReviewRequested string
+		ReviewNeeded    string
+	}
+
+	cmd := &cobra.Command{
+		Use:   "list [<owner>/<repo>]",
+		Short: "List pull requests",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Limit <= 0 {
+				return fmt.Errorf("invalid limit: %d (must be positive)", opts.Limit)
+			}
+
+			scope, err := resolvePRListScope(opts.Author, opts.Assignee, opts.ReviewRequested, opts.ReviewNeeded)
+			if err != nil {
+				return err
+			}
+			if scope != "" && len(args) > 0 {
+				return fmt.Errorf("--author/--assignee/--review-requested/--review-needed @me lists pull requests across all your repositories and cannot be combined with an explicit <owner>/<repo>")
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			var prs []api.PullRequest
+			if scope != "" {
+				prs, err = api.GetPaginated[api.PullRequest](client, opts.Limit, func(page, perPage int) string {
+					return fmt.Sprintf("/user/pulls?scope=%s&state=%s&page=%d&per_page=%d", scope, opts.State, page, perPage)
+				})
+			} else {
+				repository, _, repoErr := cmdutil.ResolveRepositoryFromArgs(f, args, 0)
+				if repoErr != nil {
+					return repoErr
+				}
+				owner, repo := repository.Owner, repository.Name
+				prs, err = api.GetPaginated[api.PullRequest](client, opts.Limit, func(page, perPage int) string {
+					return fmt.Sprintf("/repos/%s/%s/pulls?state=%s&page=%d&per_page=%d", owner, repo, opts.State, page, perPage)
+				})
+			}
+			if err != nil {
+				return err
+			}
+			if opts.JSON {
+				return cmdutil.WriteJSON(cmd.OutOrStdout(), pullRequestsJSON(prs))
+			}
+
+			out := cmd.OutOrStdout()
+			for _, pr := range prs {
+				if scope != "" {
+					// Cross-repository listings must disambiguate entries:
+					// numbers are only unique within their own repository.
+					owner, repo := cmdutil.OwnerRepoFromWebURL(pr.HTMLURL)
+					if owner != "" && repo != "" {
+						fmt.Fprintf(out, "%s/%s #%s %s [%s]\n", owner, repo, pr.GetNumber(), pr.Title, pr.State)
+						continue
+					}
+				}
+				fmt.Fprintf(out, "#%s %s [%s]\n", pr.GetNumber(), pr.Title, pr.State)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&opts.State, "state", "s", "open", "Filter by state: open, closed, locked, merged, all")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum number of PRs to list")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output pull requests as JSON")
+	cmd.Flags().StringVar(&opts.Author, "author", "", "Filter by author: @me for PRs you created across all your repositories")
+	cmd.Flags().StringVar(&opts.Assignee, "assignee", "", "Filter by assignee: @me for PRs assigned to you across all your repositories")
+	cmd.Flags().StringVar(&opts.ReviewRequested, "review-requested", "", "Filter by requested approver: @me for PRs that need your approval across all your repositories")
+	cmd.Flags().StringVar(&opts.ReviewNeeded, "review-needed", "", "Filter by requested reviewer: @me for PRs that need your review across all your repositories")
+	cmdutil.RegisterValueCompletion(cmd, "state", prListStates)
+
+	return cmd
+}
+
+func newCmdPRView(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		web  bool
+		json bool
+	}
+
+	cmd := &cobra.Command{
+		Use:   "view [<owner>/<repo>] <number>",
+		Short: "View a pull request",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parsePRNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			if opts.web {
+				num, _ := strconv.Atoi(number)
+				u := browser.BuildPRURL(owner, repo, num)
+				fmt.Fprintf(cmd.OutOrStdout(), "Opening %s in your browser.\n", u)
+				if f.BrowserOpener != nil {
+					if err := f.BrowserOpener(u); err != nil {
+						return fmt.Errorf("failed to open browser: %w", err)
+					}
+				}
+				return nil
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			var pr api.PullRequest
+			path := fmt.Sprintf("/repos/%s/%s/pulls/%s", owner, repo, number)
+			if err := client.Get(path, &pr); err != nil {
+				return err
+			}
+
+			// Get PR labels from separate endpoint
+			var labels []api.Label
+			labelsPath := fmt.Sprintf("/repos/%s/%s/pulls/%s/labels", owner, repo, number)
+			if err := client.Get(labelsPath, &labels); err != nil {
+				// Labels endpoint might not exist or fail, continue without labels
+				labels = nil
+			}
+			if opts.json {
+				return cmdutil.WriteJSON(cmd.OutOrStdout(), newPullRequestViewJSON(pr, labels))
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Title: %s\n", pr.Title)
+			fmt.Fprintf(out, "State: %s\n", pr.State)
+			fmt.Fprintf(out, "Author: %s\n", pr.User.Login)
+			fmt.Fprintf(out, "URL: %s\n", pr.HTMLURL)
+			fmt.Fprintf(out, "Branch: %s -> %s\n", pr.Head.Ref, pr.Base.Ref)
+			if len(labels) > 0 {
+				labelNames := make([]string, len(labels))
+				for i, label := range labels {
+					labelNames[i] = label.Name
+				}
+				fmt.Fprintf(out, "Labels: %s\n", strings.Join(labelNames, ", "))
+			}
+			fmt.Fprintf(out, "Created: %s\n", pr.CreatedAt)
+			if pr.Body != "" {
+				fmt.Fprintf(out, "\n%s\n", pr.Body)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&opts.web, "web", "w", false, "Open a pull request in the browser")
+	cmd.Flags().BoolVar(&opts.json, "json", false, "Output pull request as JSON")
+	cmd.MarkFlagsMutuallyExclusive("web", "json")
+
+	return cmd
+}
+
+type pullRequestJSON struct {
+	ID        int64    `json:"id"`
+	Number    string   `json:"number"`
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	State     string   `json:"state"`
+	URL       string   `json:"url"`
+	Author    string   `json:"author"`
+	Head      string   `json:"head"`
+	Base      string   `json:"base"`
+	Labels    []string `json:"labels"`
+	CreatedAt string   `json:"createdAt"`
+	UpdatedAt string   `json:"updatedAt"`
+	Merged    bool     `json:"merged"`
+	Mergeable bool     `json:"mergeable"`
+}
+
+type pullRequestViewJSON struct {
+	ID                int64          `json:"id"`
+	Number            string         `json:"number"`
+	Title             string         `json:"title"`
+	Body              string         `json:"body"`
+	State             string         `json:"state"`
+	URL               string         `json:"url"`
+	Author            string         `json:"author"`
+	Head              string         `json:"head"`
+	Base              string         `json:"base"`
+	Labels            []string       `json:"labels"`
+	CreatedAt         string         `json:"createdAt"`
+	UpdatedAt         string         `json:"updatedAt"`
+	Merged            bool           `json:"merged"`
+	Mergeable         bool           `json:"mergeable"`
+	Assignees         []string       `json:"assignees"`
+	ApprovalReviewers []string       `json:"approvalReviewers"`
+	Testers           []string       `json:"testers"`
+	Milestone         *milestoneJSON `json:"milestone"`
+}
+
+type milestoneJSON struct {
+	Number string `json:"number"`
+	Title  string `json:"title"`
+	State  string `json:"state"`
+	URL    string `json:"url"`
+}
+
+func pullRequestsJSON(pullRequests []api.PullRequest) []pullRequestJSON {
+	result := make([]pullRequestJSON, len(pullRequests))
+	for index, pullRequest := range pullRequests {
+		result[index] = newPullRequestJSON(pullRequest, pullRequest.Labels)
+	}
+	return result
+}
+
+func newPullRequestJSON(pullRequest api.PullRequest, labels []api.Label) pullRequestJSON {
+	labelNames := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if name := strings.TrimSpace(label.Name); name != "" {
+			labelNames = append(labelNames, name)
+		}
+	}
+	return pullRequestJSON{ID: pullRequest.ID, Number: pullRequest.GetNumber(), Title: pullRequest.Title, Body: pullRequest.Body, State: pullRequest.State, URL: pullRequest.HTMLURL, Author: pullRequest.User.Login, Head: pullRequest.Head.Ref, Base: pullRequest.Base.Ref, Labels: labelNames, CreatedAt: pullRequest.CreatedAt, UpdatedAt: pullRequest.UpdatedAt, Merged: pullRequest.IsMerged(), Mergeable: pullRequest.Mergeable}
+}
+
+func newPullRequestViewJSON(pullRequest api.PullRequest, labels []api.Label) pullRequestViewJSON {
+	base := newPullRequestJSON(pullRequest, labels)
+
+	var ms *milestoneJSON
+	if pullRequest.Milestone != nil {
+		ms = &milestoneJSON{
+			Number: pullRequest.Milestone.GetNumber(),
+			Title:  pullRequest.Milestone.Title,
+			State:  pullRequest.Milestone.State,
+			URL:    pullRequest.Milestone.URL,
+		}
+	}
+
+	return pullRequestViewJSON{
+		ID:                base.ID,
+		Number:            base.Number,
+		Title:             base.Title,
+		Body:              base.Body,
+		State:             base.State,
+		URL:               base.URL,
+		Author:            base.Author,
+		Head:              base.Head,
+		Base:              base.Base,
+		Labels:            base.Labels,
+		CreatedAt:         base.CreatedAt,
+		UpdatedAt:         base.UpdatedAt,
+		Merged:            base.Merged,
+		Mergeable:         base.Mergeable,
+		Assignees:         extractLogins(pullRequest.Assignees),
+		ApprovalReviewers: extractLogins(pullRequest.ApprovalReviewers),
+		Testers:           extractLogins(pullRequest.Testers),
+		Milestone:         ms,
+	}
+}
+
+func extractLogins(users []api.User) []string {
+	result := make([]string, 0, len(users))
+	for _, u := range users {
+		if login := strings.TrimSpace(u.Login); login != "" {
+			result = append(result, login)
+		}
+	}
+	return result
+}
+func newCmdPRCreate(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		Title             string
+		Body              string
+		BodyFile          string
+		Base              string
+		Draft             bool
+		Head              string
+		PruneSourceBranch bool
+		Metadata          prCreateMetadataOptions
+	}
+
+	cmd := &cobra.Command{
+		Use:   "create [<owner>/<repo>]",
+		Short: "Create a pull request",
+		Long: `Create a pull request and optionally set its collaboration metadata.
+
+Assignees own follow-up work, approval reviewers approve the change, and
+testers verify it. These AtomGit roles are managed independently. Labels and
+milestones must already exist in the repository.`,
+		Example: `  ag-cli pr create owner/repo --title "Fix bug" --body "Description" --base main --head feature
+  ag-cli pr create owner/repo --title "Fix bug" --body "Description" --base main --head feature --draft
+  ag-cli pr create owner/repo --title "Fix bug" --body-file description.md --base main --head feature
+  ag-cli pr create owner/repo --title "Fix bug" --body-file - --base main --head feature
+  ag-cli pr create owner/repo --title "Fix bug" --head feature --prune-branch`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.Title == "" {
+				return fmt.Errorf("title is required")
+			}
+			var bodyText string
+			var err error
+			if opts.BodyFile != "-" {
+				bodyText, err = cmdutil.ReadBody(
+					opts.Body,
+					opts.BodyFile,
+					cmd.Flags().Changed("body"),
+					cmd.Flags().Changed("body-file"),
+					cmd.InOrStdin(),
+				)
+				if err != nil {
+					return err
+				}
+			}
+			repository, _, err := cmdutil.ResolveRepositoryFromArgs(f, args, 0)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			if opts.BodyFile == "-" {
+				bodyText, err = cmdutil.ReadBody(
+					opts.Body,
+					opts.BodyFile,
+					cmd.Flags().Changed("body"),
+					cmd.Flags().Changed("body-file"),
+					cmd.InOrStdin(),
+				)
+				if err != nil {
+					return err
+				}
+			}
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			metadata, err := resolvePRCreateMetadata(client, owner, repo, opts.Metadata)
+			if err != nil {
+				return err
+			}
+			base := strings.TrimSpace(opts.Base)
+			if base == "" {
+				var repository api.Repository
+				path := fmt.Sprintf("/repos/%s/%s", owner, repo)
+				if err := client.Get(path, &repository); err != nil {
+					return err
+				}
+				base, err = resolveBaseBranch("", repository)
+				if err != nil {
+					return err
+				}
+			}
+
+			head := opts.Head
+			// Convert owner:branch format to owner/repo:branch for AtomGit API
+			if strings.Contains(head, ":") && !strings.Contains(head, "/") {
+				headParts := strings.SplitN(head, ":", 2)
+				head = fmt.Sprintf("%s/%s:%s", headParts[0], repo, headParts[1])
+			}
+
+			body := map[string]any{
+				"title": opts.Title,
+				"body":  bodyText,
+				"base":  base,
+				"head":  head,
+			}
+			metadata.addToCreateBody(body)
+			if cmd.Flags().Changed("draft") {
+				body["draft"] = opts.Draft
+			}
+
+			if cmd.Flags().Changed("prune-branch") {
+				body["prune_source_branch"] = opts.PruneSourceBranch
+			}
+
+			var pr api.PullRequestWriteResponse
+			path := fmt.Sprintf("/repos/%s/%s/pulls", owner, repo)
+			if err := client.Post(path, body, &pr); err != nil {
+				return err
+			}
+
+			number := pr.GetNumber()
+			if number == "" {
+				return fmt.Errorf("created PR response did not include a PR number")
+			}
+			htmlURL := pullRequestResultURL(pr.GetURL(), f.Config.GetHost(), owner, repo, number)
+			if err := applyPRCreateMetadata(client, owner, repo, number, metadata); err != nil {
+				return fmt.Errorf("created PR #%s at %s, but failed to set collaboration metadata: %w", number, htmlURL, err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Created PR #%s: %s\n", number, htmlURL)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&opts.Title, "title", "t", "", "PR title")
+	cmd.Flags().StringVarP(&opts.Body, "body", "b", "", "PR body")
+	cmd.Flags().StringVarP(&opts.BodyFile, "body-file", "F", "", "Read PR body from file (use - for stdin)")
+	cmd.Flags().StringVar(&opts.Base, "base", "", "Base branch (defaults to repository default)")
+	cmd.Flags().StringVar(&opts.Head, "head", "", "Head branch")
+	cmd.Flags().BoolVar(&opts.Draft, "draft", false, "Mark pull request as a draft")
+	cmd.Flags().BoolVar(&opts.PruneSourceBranch, "prune-branch", false, "Delete the source branch after the PR is merged")
+	cmd.Flags().StringSliceVar(&opts.Metadata.Assignees, "assignee", nil, "Assignee login (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.Reviewers, "reviewer", nil, "Approval reviewer login (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.Testers, "tester", nil, "Tester login (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.Labels, "label", nil, "Label name (repeat for multiple labels)")
+	cmd.Flags().StringVar(&opts.Metadata.Milestone, "milestone", "", "Milestone number or exact title")
+	cmd.MarkFlagsMutuallyExclusive("body", "body-file")
+	commandschema.Annotate(cmd, commandschema.Metadata{
+		Positionals:   &commandschema.Positionals{MinCount: 0, MaxCount: 1, Description: "Optional owner/repo; when omitted, resolve repository context from Git."},
+		RequiredFlags: []string{"title"}, Output: "text", Effects: "write",
+		Notes: []string{"Title must be non-empty. An empty base selects the repository default branch at execution time.", "Collaboration metadata and repository/branch values require additional local or server validation."},
+	})
+
+	return cmd
+}
+
+func newCmdPREdit(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		Title    string
+		Body     string
+		BodyFile string
+		Metadata prEditMetadataOptions
+	}
+
+	cmd := &cobra.Command{
+		Use:   "edit [<owner>/<repo>] <number>",
+		Short: "Edit a pull request",
+		Long: `Edit a pull request and explicitly add or remove collaboration metadata.
+
+Assignees, approval reviewers, and testers are distinct AtomGit roles.
+Unspecified metadata is left unchanged; use --milestone none to clear the
+current milestone.`,
+		Example: `  ag-cli pr edit owner/repo 123 --title "Updated title"
+  ag-cli pr edit owner/repo 123 --body "Updated description"
+  ag-cli pr edit owner/repo 123 --body-file description.md
+  ag-cli pr edit owner/repo 123 --body-file -`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parsePRNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			bodyChanged := cmd.Flags().Changed("body")
+			bodyFileChanged := cmd.Flags().Changed("body-file")
+			bodyRequested := bodyChanged || bodyFileChanged
+			var bodyText string
+			if bodyChanged && bodyFileChanged {
+				_, err = cmdutil.ReadBody(opts.Body, opts.BodyFile, bodyChanged, bodyFileChanged, cmd.InOrStdin())
+				return err
+			}
+			if bodyRequested && opts.BodyFile != "-" {
+				bodyText, err = cmdutil.ReadBody(opts.Body, opts.BodyFile, bodyChanged, bodyFileChanged, cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
+			}
+
+			metadataRequested := opts.Metadata.requested(cmd)
+			body := map[string]any{}
+			if opts.Title != "" {
+				body["title"] = opts.Title
+			}
+
+			if len(body) == 0 && !bodyRequested && !metadataRequested {
+				return fmt.Errorf("at least one PR field or collaboration metadata flag must be provided")
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			if bodyRequested && opts.BodyFile == "-" {
+				bodyText, err = cmdutil.ReadBody(opts.Body, opts.BodyFile, bodyChanged, bodyFileChanged, cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
+			}
+			if bodyRequested {
+				body["body"] = bodyText
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			metadata, err := resolvePREditMetadata(client, owner, repo, number, opts.Metadata, cmd)
+			if err != nil {
+				return err
+			}
+
+			path := fmt.Sprintf("/repos/%s/%s/pulls/%s", owner, repo, number)
+			var pr api.PullRequestWriteResponse
+			if len(body) > 0 {
+				if err := client.Patch(path, body, &pr); err != nil {
+					return err
+				}
+			}
+			if metadataRequested {
+				if err := applyPREditMetadata(client, owner, repo, number, metadata); err != nil {
+					return fmt.Errorf("failed to update collaboration metadata for PR #%s: %w", number, err)
+				}
+			}
+
+			resultNumber := pr.GetNumber()
+			if resultNumber == "" {
+				resultNumber = number
+			}
+			htmlURL := pullRequestResultURL(pr.GetURL(), f.Config.GetHost(), owner, repo, resultNumber)
+			fmt.Fprintf(cmd.OutOrStdout(), "Updated PR #%s: %s\n", resultNumber, htmlURL)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&opts.Title, "title", "t", "", "New PR title")
+	cmd.Flags().StringVarP(&opts.Body, "body", "b", "", "New PR body")
+	cmd.Flags().StringVarP(&opts.BodyFile, "body-file", "F", "", "Read new PR body from file (use - for stdin)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.AddAssignees, "add-assignee", nil, "Assignee login to add (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.RemoveAssignees, "remove-assignee", nil, "Assignee login to remove (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.AddReviewers, "add-reviewer", nil, "Approval reviewer login to add (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.RemoveReviewers, "remove-reviewer", nil, "Approval reviewer login to remove (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.AddTesters, "add-tester", nil, "Tester login to add (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.RemoveTesters, "remove-tester", nil, "Tester login to remove (repeat for multiple users)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.AddLabels, "add-label", nil, "Label name to add (repeat for multiple labels)")
+	cmd.Flags().StringSliceVar(&opts.Metadata.RemoveLabels, "remove-label", nil, "Label name to remove (repeat for multiple labels)")
+	cmd.Flags().StringVar(&opts.Metadata.Milestone, "milestone", "", "Milestone number, exact title, or 'none' to clear")
+	cmd.MarkFlagsMutuallyExclusive("body", "body-file")
+
+	return cmd
+}
+
+func newCmdPRClose(f *cmdutil.Factory) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "close [<owner>/<repo>] <number>",
+		Short: "Close a pull request",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parsePRNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			body := map[string]string{
+				"state": "closed",
+			}
+
+			var pr api.PullRequestWriteResponse
+			path := fmt.Sprintf("/repos/%s/%s/pulls/%s", owner, repo, number)
+			if err := client.Patch(path, body, &pr); err != nil {
+				return err
+			}
+
+			resultNumber := pr.GetNumber()
+			if resultNumber == "" {
+				resultNumber = number
+			}
+			htmlURL := pullRequestResultURL(pr.GetURL(), f.Config.GetHost(), owner, repo, resultNumber)
+			fmt.Fprintf(cmd.OutOrStdout(), "Closed PR #%s: %s\n", resultNumber, htmlURL)
+
+			return nil
+		},
+	}
+
+	return cmd
+}
+
+func newCmdPRReopen(f *cmdutil.Factory) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reopen [<owner>/<repo>] <number>",
+		Short: "Reopen a pull request",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parsePRNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			body := map[string]string{
+				"state": "open",
+			}
+
+			path := fmt.Sprintf("/repos/%s/%s/pulls/%s", owner, repo, number)
+			if err := client.Patch(path, body, nil); err != nil {
+				return fmt.Errorf("failed to reopen PR: %w", err)
+			}
+
+			htmlURL := pullRequestResultURL("", f.Config.GetHost(), owner, repo, number)
+			cmd.Printf("Reopened PR #%s: %s\n", number, htmlURL)
+
+			return nil
+		},
+	}
+
+	return cmd
+}
+
+func newCmdPRDiff(f *cmdutil.Factory) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "diff [<owner>/<repo>] <number>",
+		Short: "Show diff of a pull request",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Resolve and validate arguments before any authentication or
+			// network initialization so invalid input never reaches GetToken.
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parsePRNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			path := fmt.Sprintf("/repos/%s/%s/pulls/%s/diff", owner, repo, number)
+			resp, err := client.DoRequestRaw(http.MethodGet, path)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close() //nolint:errcheck // Status and streamed output copy errors are handled separately; Close only releases response resources.
+
+			if resp.StatusCode != http.StatusOK {
+				return api.NewHTTPError(resp)
+			}
+
+			_, err = io.Copy(cmd.OutOrStdout(), resp.Body)
+			return err
+		},
+	}
+
+	return cmd
+}
+
+func newCmdPRMerge(f *cmdutil.Factory) *cobra.Command {
+	var opts struct {
+		Rebase       bool
+		Squash       bool
+		Admin        bool
+		Subject      string
+		Body         string
+		DeleteBranch bool
+	}
+
+	cmd := &cobra.Command{
+		Use:   "merge [<owner>/<repo>] <number>",
+		Short: "Merge a pull request",
+		Long: `Merge a pull request.
+
+By default, ag-cli creates a merge commit. Use --rebase to rebase the commits onto the base branch.
+`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repository, remaining, err := cmdutil.ResolveRepositoryFromArgs(f, args, 1)
+			if err != nil {
+				return err
+			}
+			owner, repo := repository.Owner, repository.Name
+			number, err := parsePRNumber(remaining[0])
+			if err != nil {
+				return err
+			}
+
+			token, err := f.Config.GetToken()
+			if err != nil {
+				return cmdutil.AuthenticationError(err)
+			}
+
+			client, err := f.NewAPIClient(token)
+			if err != nil {
+				return err
+			}
+
+			var pr api.PullRequest
+			path := fmt.Sprintf("/repos/%s/%s/pulls/%s", owner, repo, number)
+			if err := client.Get(path, &pr); err != nil {
+				return fmt.Errorf("failed to get PR %s/%s #%s: %w", owner, repo, number, err)
+			}
+
+			if pr.IsMerged() {
+				return fmt.Errorf("PR #%s is already merged", pr.GetNumber())
+			}
+			if pr.State != "open" {
+				return fmt.Errorf("PR #%s is closed, cannot merge", pr.GetNumber())
+			}
+
+			// Note: Work as intended.
+			// AtomGit supports squash under rebase, see PR #32.
+			mergeMethod := "merge"
+			if opts.Rebase {
+				mergeMethod = "rebase"
+			}
+
+			reqBody := api.MergePRRequest{
+				MergeMethod: mergeMethod,
+				Title:       opts.Subject,
+				ForceMerge:  opts.Admin,
+				Squash:      opts.Squash,
+			}
+			if opts.Squash {
+				reqBody.SquashCommitMessage = opts.Body
+			} else {
+				reqBody.Description = opts.Body
+			}
+
+			mergePath := fmt.Sprintf("/repos/%s/%s/pulls/%s/merge", owner, repo, number)
+			var mergeResp api.MergePRResponse
+			if err := client.Put(mergePath, reqBody, &mergeResp); err != nil {
+				return fmt.Errorf("failed to merge PR #%s: %w", number, err)
+			}
+
+			if !mergeResp.Merged {
+				msg := mergeResp.Message
+				return fmt.Errorf("failed to merge PR #%s: %s", number, msg)
+			}
+
+			switch {
+			case mergeMethod == "merge" && !opts.Squash:
+				fmt.Fprintf(cmd.OutOrStdout(), "Merged PR #%s: %s\n", pr.GetNumber(), pr.HTMLURL)
+			case mergeMethod == "merge" && opts.Squash:
+				fmt.Fprintf(cmd.OutOrStdout(), "Squashed and merged PR #%s: %s\n", pr.GetNumber(), pr.HTMLURL)
+			case mergeMethod == "rebase" && !opts.Squash:
+				fmt.Fprintf(cmd.OutOrStdout(), "Rebased and merged PR #%s: %s\n", pr.GetNumber(), pr.HTMLURL)
+			case mergeMethod == "rebase" && opts.Squash:
+				fmt.Fprintf(cmd.OutOrStdout(), "Rebased and merged PR with squash #%s: %s\n", pr.GetNumber(), pr.HTMLURL)
+			}
+
+			if opts.DeleteBranch {
+				sourceRepo := strings.TrimSpace(pr.Head.Repo.FullName)
+				sourceBranch := strings.TrimSpace(pr.Head.Ref)
+				if sourceRepo == "" || sourceBranch == "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: cannot determine source repository or branch, skipping branch deletion\n")
+				} else {
+					branchName := url.PathEscape(sourceBranch)
+					delPath := fmt.Sprintf("/repos/%s/branches/%s", sourceRepo, branchName)
+					if err := client.Delete(delPath); err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to delete branch %s: %v\n", sourceBranch, err)
+					} else {
+						fmt.Fprintf(cmd.OutOrStdout(), "Deleted remote branch %s\n", sourceBranch)
+					}
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&opts.Rebase, "rebase", "r", false, "Rebase the commits onto the base branch")
+	cmd.Flags().BoolVarP(&opts.Squash, "squash", "s", false, "Squash the commits into one commit")
+	cmd.Flags().BoolVar(&opts.Admin, "admin", false, "Use administrator privileges to merge a pull request that does not meet requirements")
+	cmd.Flags().StringVarP(&opts.Subject, "subject", "t", "", "Subject text for the merge commit")
+	cmd.Flags().StringVarP(&opts.Body, "body", "b", "", "Body text for the merge commit")
+	cmd.Flags().BoolVarP(&opts.DeleteBranch, "delete-branch", "d", false, "Delete the source branch after merge")
+
+	return cmd
+}

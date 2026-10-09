@@ -1,0 +1,138 @@
+# 项目结构
+
+本文档介绍 AtomGit CLI 的代码组织、主要执行流程和各目录职责。命令的使用方法请参阅[命令使用指南](usage.md)，安装方法请参阅[安装指南](installation.md)。
+
+## 目录
+
+- [执行流程](#执行流程)
+- [目录说明](#目录说明)
+- [命令组织](#命令组织)
+- [API 与配置](#api-与配置)
+- [测试](#测试)
+
+## 执行流程
+
+CLI 的主要执行路径如下：
+
+```text
+cmd/ag-cli/main.go
+  └── internal/agcmd.Main
+      └── pkg/cmd/root.NewCmdRoot
+          └── pkg/cmd/<name>.NewCmdXxx
+              ├── internal/api
+              ├── internal/config
+              └── pkg/cmdutil
+```
+
+- `cmd/ag-cli` 只负责可执行程序入口。
+- `internal/agcmd` 初始化根命令、执行命令并处理顶层错误和退出码。
+- `pkg/cmd/root` 创建 Cobra 根命令并注册各子命令。
+- `pkg/cmd/<name>` 实现具体命令、参数校验和输出。
+- `internal/api`、`internal/config` 等内部包提供底层能力。
+
+`internal/mangen` 负责从 Cobra 元数据生成可重复的 section 1 roff 手册；`scripts/generate-manpages` 是离线生成与检查入口，`scripts/check-release-manpages.js` 校验 Unix 归档是否包含完整页面集合。默认手册输出在被忽略的 `dist/man/man1` 中。
+
+## 目录说明
+
+```text
+atomgit-cli/
+├── cmd/
+│   └── ag-cli/                     # ag-cli 可执行程序入口
+├── internal/
+│   ├── agcmd/                  # 命令初始化、执行与退出码处理
+│   ├── api/                    # AtomGit API 客户端、类型和分页逻辑
+│   │   ├── actions/            # Actions API v8 客户端与类型
+│   │   └── testdata/           # API 测试响应样本
+│   ├── apicontract/            # 离线契约回放、响应结构检查与可选只读 smoke
+│   ├── browser/                # 打开系统浏览器
+│   ├── commandschema/          # Cobra 静态命令描述与补充注解
+│   ├── config/                 # XDG 配置与凭据读写
+│   ├── oauth/                  # OAuth 登录流程
+│   └── version/                # 版本、提交和构建时间元数据
+├── pkg/
+│   ├── cmdutil/                # 命令共享依赖和通用辅助逻辑
+│   └── cmd/                    # Cobra 根命令与所有子命令
+│       ├── api/                # 通用 API 请求
+│       ├── auth/               # 登录、刷新和凭据管理
+│       ├── branch/             # 分支管理
+│       ├── browse/             # 在浏览器中打开 AtomGit 资源
+│       ├── discussion/         # 讨论列举
+│       ├── issue/              # Issue 与 Issue 评论
+│       ├── label/              # 标签管理
+│       ├── license/            # License 检查
+│       ├── org/                # 组织查询
+│       ├── pr/                 # Pull Request、审查与评论
+│       ├── release/            # Release 与附件管理
+│       ├── repo/               # 仓库管理
+│       ├── root/               # 根命令和全局参数
+│       ├── run/                # Actions run、job、日志与 artifact
+│       ├── schema/             # 无凭据、无网络的机器可读命令说明
+│       ├── search/             # 用户、仓库和 Issue 搜索
+│       ├── ssh-key/            # SSH Key 管理
+│       ├── tag/                # Git tag 与保护 tag 规则管理
+│       └── version/            # 版本输出命令
+├── nix/                        # stable/latest Nix package 表达式与共享构建参数
+├── bin/
+│   └── ag-cli.js                   # npm 主包的平台二进制启动器
+├── docs/
+│   ├── api-contracts.md        # OpenAPI fixture 格式与验证流程
+│   ├── configuration.md        # 认证、凭据和运行配置
+│   ├── cross_repo_pr_demo.md   # 跨仓库 PR 示例
+│   ├── installation.md         # 完整安装指南
+│   ├── project-structure.md    # 本文档
+│   ├── releasing.md            # 发布打包与 Nix package 维护
+│   └── usage.md                # 命令参数和使用示例
+├── scripts/
+│   ├── build-release.sh        # GoReleaser 打包包装脚本
+│   ├── build-npm-packages.js   # 生成 npm 主包与平台包
+│   ├── check-npm-version.js    # 校验发布版本与 npm 版本
+│   ├── publish-atomgit-release.js # 创建并验证 AtomGit Release
+│   ├── publish-npm-packages.js # 校验并安全发布 npm 制品
+│   ├── install-nix.sh          # 摘要校验后安装固定版本 Nix（更新工作流用）
+│   ├── publish-nix-update.sh   # 凭据安全的 Nix 更新写回（Bearer 头、有界脱敏）
+│   ├── update-nix-packages.sh  # 从最新 Release 刷新 stable/latest Nix package
+ │   └── set-npm-version.js      # 同步 npm 包版本
+├── .gitcode/workflows/        # AtomGit CI、Release 与自动 Nix 更新工作流
+├── test/                       # npm 平台包、发布流程与 Nix 更新脚本测试
+├── .goreleaser.yaml            # 跨平台发布打包配置
+├── flake.nix                   # Nix package 和开发环境
+├── install.sh                  # Linux/macOS Release 安装脚本
+├── install.ps1                 # Windows Release 安装脚本
+├── Makefile                    # 构建、测试、安装和发布入口
+├── package.json                # npm 主包元数据
+└── go.mod                      # Go 模块、最低版本与建议工具链声明
+```
+
+`dist/` 和 `node_modules/` 是本地生成目录，不属于源代码，也不应提交。
+
+## 命令组织
+
+每组根级命令位于独立的 `pkg/cmd/<name>` 包中，通常由 `NewCmdXxx` 创建 Cobra 命令，并在 `pkg/cmd/root/root.go` 中注册。包含多个操作的命令可继续拆分文件或子包，例如：
+
+- `pkg/cmd/issue/comment`：Issue 评论的创建、查看、编辑和删除。
+- `pkg/cmd/pr/comment`：Pull Request 评论以及回复。
+- `pkg/cmd/release`：Release 的创建、编辑、查看、上传和下载。
+
+命令通过 `pkg/cmdutil.Factory` 获取配置等共享依赖。Cobra 命令负责参数校验、仓库解析、交互确认和输出渲染；领域 API（`internal/api` 与 `internal/api/actions`）负责端点路径、请求/响应契约、允许的成功状态码和重试策略。命令的 `RunE` 不应拼接 API 路径或决定 HTTP 成功码。
+
+## API 与配置
+
+- 常规仓库功能使用 `internal/api` 中的 AtomGit API v5 客户端。
+- Actions 运行记录使用 `internal/api/actions` 中的 API v8 客户端。
+- 需要登录的命令使用 `Factory.AuthenticatedAPIClient` 或 `Factory.AuthenticatedActionsClient`；公开只读内容使用 `Factory.OptionalAPIClient`。可选认证只在尚未登录时降级为匿名请求，凭据存储故障不得匿名兜底。
+- 仓库与资源标识通过 `api.RepositoryPath` 等共享 helper 转义一次；调用方传入原始值，不要预先 `url.PathEscape`。
+- API 请求和响应结构集中定义，字段使用明确的 JSON 标签。领域操作应显式指定 `RequestPolicy`：只读请求可按契约重试一次网络错误；写操作默认不重试。
+- 新增端点族应先提供领域客户端，再由命令调用。现有命令在下次改动该命令族时再机会式迁移；参考实现是 `discussion`（只读、可选认证）和 `label`（读写、必需认证）。
+- 用户配置和凭据由 `internal/config` 管理，并兼容 XDG 主路径与旧版 token 路径。
+- OAuth 浏览器登录流程位于 `internal/oauth`，系统浏览器调用封装在 `internal/browser`。
+
+各命令族与 v5/v8/OAuth/外部服务、本地行为的对应关系，已知缺口及合作方模块归属，
+统一维护在 [OpenAPI 覆盖与责任清单](openapi-coverage.md)。该清单区分源码核对、
+mock 和在线证据，不以注册命令数推断整个 OpenAPI 的覆盖率；
+`pkg/cmd/root/coverage_manifest_test.go` 在常规测试中校验登记与相对链接。
+
+## 测试
+
+Go 测试文件与被测包放在同一目录，API 响应样本放在 `internal/api/testdata`；`test/` 包含 npm 平台包和发布流程测试。命令测试通过依赖注入、临时目录和模拟 HTTP 服务运行，不依赖真实 AtomGit/npm 凭据或外部网络。
+
+新增命令或修改目录职责时，应同步更新本文档和项目 [README](../README.md) 中的入口说明。
