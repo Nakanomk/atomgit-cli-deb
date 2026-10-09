@@ -6,19 +6,23 @@ export LC_ALL=C TZ=UTC
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GO=${GO:-go}
 if [[ "$GO" == */* ]]; then GO=$(realpath -- "$GO"); fi
-EXPECTED_GO=go1.26.8
-ACTUAL_GO=$("$GO" version | awk '{print $3}')
-[[ "$ACTUAL_GO" == "$EXPECTED_GO" ]] || {
-  echo "Use Go 1.26.8: set GO=/path/to/go1.26.8/bin/go" >&2
+export GOTOOLCHAIN=local
+# shellcheck source=packaging/upstream.env
+source "$ROOT/packaging/upstream.env"
+ACTUAL_GO=$("$GO" version)
+[[ "$ACTUAL_GO" == "go version $EXPECTED_GO "* ]] || {
+  echo "Use $EXPECTED_GO: set GO=/path/to/$EXPECTED_GO/bin/go" >&2
   exit 1
 }
-export SOURCE_DATE_EPOCH=1791461444
-VERSION=0.7.4
-DEB_VERSION=0.7.4-1~local1
-COMMIT=1b9de43514ff4f0588b06fdd4cff930fe74ce5f0
-BUILD_DATE=2026-10-08T12:10:44Z
+export SOURCE_DATE_EPOCH
+DEB_VERSION=$(dpkg-parsechangelog -l "$ROOT/packaging/changelog" -S Version)
+MAINTAINER=$(dpkg-parsechangelog -l "$ROOT/packaging/changelog" -S Maintainer)
+[[ "${DEB_VERSION%-*}" == "$VERSION" ]] || {
+  echo "Debian changelog version $DEB_VERSION does not match upstream $VERSION" >&2
+  exit 1
+}
 export GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0
-export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor
+export GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor
 OUTPUT=${1:-"$ROOT/output"}
 mkdir -p -- "$OUTPUT"
 OUTPUT=$(cd -- "$OUTPUT" && pwd)
@@ -39,12 +43,12 @@ STAGE="$WORK/package"
 install -d "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/doc/atomgit-cli" "$STAGE/usr/share/man/man1"
 LDFLAGS="-s -w -buildid= -X atomgit.com/hust-open-atom-club/atomgit-cli/internal/version.Version=v$VERSION -X atomgit.com/hust-open-atom-club/atomgit-cli/internal/version.Commit=$COMMIT -X atomgit.com/hust-open-atom-club/atomgit-cli/internal/version.BuildDate=$BUILD_DATE"
 "$GO" build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "$STAGE/usr/bin/ag-cli" ./cmd/ag-cli
-if readelf -l "$STAGE/usr/bin/ag-cli" | grep -q INTERP || readelf -d "$STAGE/usr/bin/ag-cli" | grep -q NEEDED; then
+if readelf -l "$STAGE/usr/bin/ag-cli" | grep -F INTERP >/dev/null || readelf -d "$STAGE/usr/bin/ag-cli" | grep -F NEEDED >/dev/null; then
   echo 'Expected a fully static ELF; inspect dependencies before packaging.' >&2
   exit 1
 fi
-"$GO" run -trimpath -buildvcs=false ./scripts/generate-manpages --output "$STAGE/usr/share/man/man1" --version "v$VERSION" --date 2026-10-08
-"$GO" run -trimpath -buildvcs=false ./scripts/generate-manpages --output "$STAGE/usr/share/man/man1" --version "v$VERSION" --date 2026-10-08 --check
+"$GO" run -trimpath -buildvcs=false ./scripts/generate-manpages --output "$STAGE/usr/share/man/man1" --version "v$VERSION" --date "${BUILD_DATE%%T*}"
+"$GO" run -trimpath -buildvcs=false ./scripts/generate-manpages --output "$STAGE/usr/share/man/man1" --version "v$VERSION" --date "${BUILD_DATE%%T*}" --check
 find "$STAGE/usr/share/man/man1" -type f -name '*.1' -exec gzip -n -9 {} +
 DOC="$STAGE/usr/share/doc/atomgit-cli"
 install -m 0644 LICENSE "$DOC/copyright"
@@ -66,7 +70,7 @@ Version: $DEB_VERSION
 Section: devel
 Priority: optional
 Architecture: amd64
-Maintainer: Nakanomk <56832666+Nakanomk@users.noreply.github.com>
+Maintainer: $MAINTAINER
 Installed-Size: $INSTALLED_SIZE
 Depends: ca-certificates
 Recommends: git
@@ -75,7 +79,7 @@ Homepage: https://atomgit.com/hust-open-atom-club/atomgit-cli
 Description: command-line interface for AtomGit
  Manage AtomGit repositories, issues, pull requests, releases and workflows.
  This local, unofficial Debian package installs the ag-cli executable and
- Unix manuals. Built from unmodified upstream v0.7.4 source using static Go.
+ Unix manuals. Built from unmodified upstream v$VERSION source using static Go.
 EOF
 find "$STAGE" -type d -exec chmod 0755 {} +
 find "$STAGE" -type f -exec chmod 0644 {} +
@@ -85,8 +89,6 @@ find "$STAGE" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 PACKAGE="$OUTPUT/atomgit-cli_${DEB_VERSION}_amd64.deb"
 dpkg-deb --root-owner-group --uniform-compression --threads-max=1 -Zxz -z9 --build "$STAGE" "$PACKAGE"
 dpkg-deb --info "$PACKAGE"
-"$STAGE/usr/bin/ag-cli" version --json
-"$STAGE/usr/bin/ag-cli" --help >/dev/null
-"$STAGE/usr/bin/ag-cli" schema pr create >/dev/null
+bash "$ROOT/verify-deb.sh" "$PACKAGE"
 (cd "$OUTPUT" && sha256sum "$(basename "$PACKAGE")" >SHA256SUMS)
 echo "Built: $PACKAGE"

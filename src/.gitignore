@@ -22,8 +22,9 @@ dist/
 # Output of the go coverage tool
 *.out
 
-# Dependency directories
-vendor/
+# The downstream Debian build vendors dependencies for offline builds.
+!vendor/
+!vendor/**
 node_modules/
 .ag-npm-test-*/
 openspec/

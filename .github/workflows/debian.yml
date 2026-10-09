@@ -1,0 +1,153 @@
+name: Debian package
+
+on:
+  push:
+    branches: [main]
+    tags: ['deb-*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debian-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: golang:1.26.8-trixie@sha256:aae9c439b447d24c93ee483408992857cf39a3fb6ab7fe53affc65d834891fa8
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      package: ${{ steps.metadata.outputs.package }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install packaging and test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends dpkg-dev xz-utils jq shellcheck nodejs npm
+
+      - name: Check package version and release tag
+        id: metadata
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(dpkg-parsechangelog -l packaging/changelog -S Version)
+          # Git refs cannot contain Debian's '~' or epoch separator ':'.
+          release_tag="deb-${version//[~:]/_}"
+          if [[ "$REF_TYPE" == tag && "$REF_NAME" != "$release_tag" ]]; then
+            echo "Release tag must be $release_tag, got $REF_NAME" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package=atomgit-cli_${version}_amd64.deb" >> "$GITHUB_OUTPUT"
+
+      - name: Check packaging scripts
+        run: |
+          bash -n build-deb.sh verify-deb.sh packaging/upstream.env
+          shellcheck -x build-deb.sh verify-deb.sh
+
+      - name: Test upstream npm tooling without platform downloads
+        working-directory: src
+        run: |
+          npm ci --ignore-scripts --omit=optional --no-audit --no-fund
+          npm test
+
+      - name: Build and verify Debian package offline
+        run: bash ./build-deb.sh ./dist
+
+      - name: Upload verified package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: atomgit-cli-debian-amd64
+          path: |
+            dist/${{ steps.metadata.outputs.package }}
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  install:
+    name: Install on Debian ${{ matrix.debian }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        debian: ['12', '13']
+    container:
+      image: debian:${{ matrix.debian }}-slim
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: atomgit-cli-debian-amd64
+          path: dist
+
+      - name: Check checksum and install package
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          apt-get update
+          apt-get install -y --no-install-recommends ./dist/*.deb
+
+      - name: Exercise installed CLI and uninstall
+        env:
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          test "$(dpkg-query -W -f='${Version}' atomgit-cli)" = "$EXPECTED_VERSION"
+          ag-cli version --json
+          ag-cli --help
+          ag-cli schema pr create
+          ag-cli api /user --dry-run
+          apt-get remove -y atomgit-cli
+          # Bash caches executed paths even after dpkg removes the file.
+          hash -r
+          if command -v ag-cli; then
+            echo 'ag-cli remains after uninstall' >&2
+            exit 1
+          fi
+
+  release:
+    name: Publish private GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [build, install]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: atomgit-cli-debian-amd64
+          path: dist
+
+      # Do not check out or execute repository code with the release token.
+      - name: Create release with Debian assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          DEB_VERSION: ${{ needs.build.outputs.version }}
+          PACKAGE: ${{ needs.build.outputs.package }}
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          gh release create "$RELEASE_TAG" "dist/$PACKAGE" dist/SHA256SUMS \
+            --verify-tag --title "atomgit-cli $DEB_VERSION (amd64)" \
+            --notes "Unofficial static Debian amd64 package. Verified installation on Debian 12 and 13. Install with: sudo apt install ./\"$PACKAGE\". Assets inherit this repository's visibility."

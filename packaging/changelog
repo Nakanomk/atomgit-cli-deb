@@ -1,3 +1,12 @@
+atomgit-cli (0.7.4-1~local2) unstable; urgency=medium
+
+  * Add GitHub Actions builds and private tagged Debian releases.
+  * Retain vendored dependencies in version control for offline builds.
+  * Read package version and maintainer from this changelog.
+  * Verify the extracted package, metadata and credential-free CLI behavior.
+
+ -- Nakanomk <56832666+Nakanomk@users.noreply.github.com>  Fri, 09 Oct 2026 00:00:00 +0000
+
 atomgit-cli (0.7.4-1~local1) unstable; urgency=medium
 
   * Create an unofficial local amd64 package from upstream v0.7.4.

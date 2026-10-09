@@ -1,0 +1,5 @@
+# Generated Debian artifacts; historical tracked packages are retained.
+/dist/
+/output/
+*.deb
+*.tar.gz
