@@ -23,7 +23,7 @@ MAINTAINER=$(dpkg-parsechangelog -l "$ROOT/packaging/changelog" -S Maintainer)
 }
 export GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0
 export GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor
-OUTPUT=${1:-"$ROOT/output"}
+OUTPUT=${1:-"$ROOT/dist"}
 mkdir -p -- "$OUTPUT"
 OUTPUT=$(cd -- "$OUTPUT" && pwd)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/atomgit-cli-deb.XXXXXXXX")

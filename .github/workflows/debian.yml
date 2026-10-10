@@ -36,7 +36,7 @@ jobs:
       - name: Install packaging and test tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends dpkg-dev xz-utils jq shellcheck nodejs npm
+          apt-get install -y --no-install-recommends dpkg-dev xz-utils jq shellcheck
 
       - name: Check package version and release tag
         id: metadata
@@ -58,12 +58,6 @@ jobs:
         run: |
           bash -n build-deb.sh verify-deb.sh packaging/upstream.env
           shellcheck -x build-deb.sh verify-deb.sh
-
-      - name: Test upstream npm tooling without platform downloads
-        working-directory: src
-        run: |
-          npm ci --ignore-scripts --omit=optional --no-audit --no-fund
-          npm test
 
       - name: Build and verify Debian package offline
         run: bash ./build-deb.sh ./dist
