@@ -14,7 +14,7 @@ The command is ag-cli. Upstream 0.7.4 renamed ag to ag-cli and intentionally
 provides no ag compatibility symlink. Existing ag from The Silver Searcher
 is not affected. Configuration remains in ~/.config/ag-cli.
 
-Install: sudo apt install ./atomgit-cli_0.7.4-1~local2_amd64.deb
+Install: sudo apt install ./atomgit-cli_0.7.4-1_local3_amd64.deb
 Verify: ag-cli version
 Help: ag-cli --help
 Manual: man ag-cli
@@ -35,8 +35,9 @@ manage this package: upstream's built-in updater only handles npm/Homebrew.
 This package has no maintainer scripts and performs no authentication,
 Git configuration changes, or network operations during package setup.
 
-Licenses: upstream MulanPSL-2.0 in copyright; all retained bundled-module
-and Go notices are in licenses/. build-info.txt records the Go build data.
+Licenses: upstream MulanPSL-2.0 in copyright; downstream packaging MulanPSL-2.0
+in licenses/Packaging-LICENSE. Retained bundled-module and Go notices are in
+licenses/. build-info.txt records the Go build data.
 
 BuildDate in the binary is the upstream commit timestamp, fixed for
 reproducibility, not the wall-clock time the local package was built.
@@ -46,4 +47,6 @@ Pinned source/toolchain metadata comes from packaging/upstream.env.
 GitHub Actions builds on main, pull requests and manual dispatch, and publishes
 verified .deb and SHA256SUMS assets only for a matching deb-<Debian-version> tag
 with '~' and ':' replaced by '_' to form a valid Git ref.
+Package asset names also replace '~' and ':' with '_' because GitHub normalizes
+these characters during upload; the Debian control version remains unchanged.
 Private repository artifacts and releases remain private.

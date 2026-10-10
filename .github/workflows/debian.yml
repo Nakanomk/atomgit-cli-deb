@@ -52,7 +52,7 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "package=atomgit-cli_${version}_amd64.deb" >> "$GITHUB_OUTPUT"
+          echo "package=atomgit-cli_${version//[~:]/_}_amd64.deb" >> "$GITHUB_OUTPUT"
 
       - name: Check packaging scripts
         run: |
@@ -118,7 +118,7 @@ jobs:
           fi
 
   release:
-    name: Publish private GitHub Release
+    name: Publish GitHub Release
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [build, install]
     runs-on: ubuntu-24.04

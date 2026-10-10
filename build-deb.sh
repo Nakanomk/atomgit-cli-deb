@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Copyright (c) 2026 Nakanomk
 # Rebuild the local Debian binary package without root or host installation.
 set -euo pipefail
 umask 022
@@ -56,6 +58,7 @@ install -m 0644 "$ROOT/packaging/README.Debian" "$DOC/README.Debian"
 gzip -n -9 -c CHANGELOG.md >"$DOC/changelog.gz"
 gzip -n -9 -c "$ROOT/packaging/changelog" >"$DOC/changelog.Debian.gz"
 install -d "$DOC/licenses"
+install -m 0644 "$ROOT/LICENSE" "$DOC/licenses/Packaging-LICENSE"
 install -m 0644 "$ROOT/packaging/Go-LICENSE" "$ROOT/packaging/Go-PATENTS" "$DOC/licenses/"
 cp -r "$ROOT/packaging/go-vendor-licenses" "$DOC/licenses/"
 while IFS= read -r -d '' license; do
@@ -86,7 +89,7 @@ find "$STAGE" -type f -exec chmod 0644 {} +
 chmod 0755 "$STAGE/usr/bin/ag-cli"
 (cd "$STAGE" && find usr -type f -print0 | sort -z | xargs -0 md5sum >DEBIAN/md5sums)
 find "$STAGE" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
-PACKAGE="$OUTPUT/atomgit-cli_${DEB_VERSION}_amd64.deb"
+PACKAGE="$OUTPUT/atomgit-cli_${DEB_VERSION//[~:]/_}_amd64.deb"
 dpkg-deb --root-owner-group --uniform-compression --threads-max=1 -Zxz -z9 --build "$STAGE" "$PACKAGE"
 dpkg-deb --info "$PACKAGE"
 bash "$ROOT/verify-deb.sh" "$PACKAGE"

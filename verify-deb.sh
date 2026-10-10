@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Copyright (c) 2026 Nakanomk
 # Verify the actual .deb payload without installing it on the host.
 set -euo pipefail
 export LC_ALL=C TZ=UTC
